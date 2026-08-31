@@ -169,14 +169,24 @@ export component LauncherWindow inherits Window {
                             height: parent.height;
                             clip: true;
 
-                            // Loop distance = one text width + the trailing gap.
-                            property <length> loop_dist: sub1.preferred-width + 32px;
-                            // Only run the ribbon when the text is too wide to fit.
+                            // Seamless dual-text ribbon driven by the wall clock, not by
+                            // a state transition: `animate` is disabled when a row is
+                            // created in its final selected state, but animation-tick()
+                            // always runs, so an overlong first hit scrolls from frame one.
+                            // Base ribbon constants.
+                            property <length> marquee_gap: 32px;
+                            property <length> loop_dist: sub1.preferred-width + self.marquee_gap;
                             property <bool> is_overflow: sub1.preferred-width > self.width;
-                            // Active only while this row is selected AND overflowing.
                             property <bool> active: root.selected_index == index && self.is_overflow;
 
-                            // Leading text: scrolls left by `loop_dist`, looping forever.
+                            // Time axis: a linear 0..1 progress that loops every loop_duration.
+                            property <duration> loop_duration: 6s;
+                            property <float> progress: Math.mod(animation-tick(), self.loop_duration) / self.loop_duration;
+                            // Leading text moves from 0 leftward down to -loop_dist, then wraps
+                            // invisibly thanks to the trailing copy.
+                            property <length> scroll_offset: -self.progress * self.loop_dist;
+
+                            // Leading copy.
                             sub1 := Text {
                                 text: item.subtitle;
                                 color: #6272a4;
@@ -184,19 +194,12 @@ export component LauncherWindow inherits Window {
                                 height: 100%;
                                 vertical-alignment: center;
 
-                                x: subtitle_box.active ? -subtitle_box.loop_dist : 0px;
-
-                                animate x {
-                                    duration: subtitle_box.active ? 5s : 0ms;
-                                    iteration-count: -1;
-                                    easing: linear;
-                                }
+                                x: subtitle_box.active ? subtitle_box.scroll_offset : 0px;
                             }
 
-                            // Trailing duplicate: sits exactly `loop_dist` behind the
-                            // lead, so as the lead exits left the copy slides in from the
-                            // right -- a seamless, gap-then-loop marquee with no jump.
-                            if subtitle_box.is_overflow : Text {
+                            // Trailing copy sits exactly loop_dist behind the lead, completing
+                            // the seamless loop; only rendered while active (matches lead).
+                            if subtitle_box.active : Text {
                                 text: item.subtitle;
                                 color: #6272a4;
                                 font-size: 12px;
