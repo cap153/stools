@@ -1,27 +1,30 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use nucleo_matcher::{Matcher, Config as MatcherConfig};
+use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
 use crate::core::indexer;
 use crate::core::matcher;
-use crate::core::matcher::pinyin_fields;
 use crate::core::model::AppEntry;
 use crate::launcher::{build_model, LauncherWindow};
 
 use slint::{ComponentHandle, Model};
 
+// ---------------------------------------------------------------------------
+// Desktop file directories
+// ---------------------------------------------------------------------------
 
-/// Directorys scanned for `.desktop` files, in priority order (later wins).
 fn desktop_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    // Standard user locations first so the user's own entries take priority.
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() {
         dirs.push(PathBuf::from(&home).join(".local/share/applications"));
-        dirs.push(PathBuf::from(&home).join(".local/share/flatpak/exports/share/applications"));
+        dirs.push(
+            PathBuf::from(&home)
+                .join(".local/share/flatpak/exports/share/applications"),
+        );
     }
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_default();
     if !data_home.is_empty() {
@@ -36,100 +39,137 @@ fn desktop_dirs() -> Vec<PathBuf> {
             }
         }
     }
-    // De-duplicate while preserving order.
     let mut seen = HashSet::new();
     dirs.retain(|d| seen.insert(d.clone()));
     dirs
 }
 
-/// Icon root directories that may contain the icon themes.
-fn icon_dirs() -> Vec<PathBuf> {
-    let mut dirs = Vec::new();
+// ---------------------------------------------------------------------------
+// Icon map: single bounded scan → HashMap<name, path> for O(1) lookups
+// ---------------------------------------------------------------------------
+
+const ICON_SCAN_MAX_DIRS: usize = 5000;
+
+fn build_icon_map() -> HashMap<String, PathBuf> {
+    let mut map = HashMap::with_capacity(512);
+
+    // 1) scan hicolor / user icon themes (bounded BFS, depth ≤ 3)
+    let mut roots: Vec<PathBuf> = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() {
-        dirs.push(PathBuf::from(&home).join(".local/share/icons"));
+        roots.push(PathBuf::from(&home).join(".local/share/icons"));
     }
     if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
         if !data_home.is_empty() {
-            dirs.push(PathBuf::from(data_home).join("icons"));
+            roots.push(PathBuf::from(data_home).join("icons"));
         }
     }
-    dirs.push(PathBuf::from("/usr/local/share/icons"));
-    dirs.push(PathBuf::from("/usr/share/icons"));
-    dirs.push(PathBuf::from("/usr/share/pixmaps"));
-    dirs
+    roots.push(PathBuf::from("/usr/local/share/icons"));
+    roots.push(PathBuf::from("/usr/share/icons"));
+
+    let mut stack: Vec<(PathBuf, usize)> = roots.into_iter().map(|p| (p, 0)).collect();
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = stack.pop() {
+        visited += 1;
+        if visited > ICON_SCAN_MAX_DIRS || depth > 3 {
+            continue;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
+                continue
+            };
+            let ft = entry.file_type();
+            if ft.as_ref().map_or(true, |t| t.is_file()) {
+                // found a file — record it if it's a valid image in a "known" location
+                if is_icon_file(&name) {
+                    let subdir_name = dir
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or_default();
+                    if subdir_name == "apps" || dir.parent().is_some_and(|p| {
+                        p.file_name().is_some_and(|s| s == "pixmaps")
+                    }) {
+                        let stem = name
+                            .rsplit_once('.')
+                            .map_or(name.as_str(), |(s, _)| s);
+                        map.entry(stem.to_string())
+                            .or_insert_with(|| entry.path());
+                    }
+                }
+                continue;
+            }
+            if name == "cursors" || name == "@2x" || name.starts_with('.') {
+                continue;
+            }
+            stack.push((entry.path(), depth + 1));
+        }
+    }
+
+    // 2) flat scan /usr/share/pixmaps (all files are icons there)
+    for dir in [
+        PathBuf::from("/usr/share/pixmaps"),
+        PathBuf::from("/usr/local/share/pixmaps"),
+    ] {
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for entry in rd.flatten() {
+            let Some(name) = entry.file_name().to_str().map(String::from) else {
+                continue
+            };
+            if entry.file_type().as_ref().map_or(false, |t| t.is_file())
+                && is_icon_file(&name)
+            {
+                let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+                map.entry(stem.to_string())
+                    .or_insert_with(|| entry.path());
+            }
+        }
+    }
+
+    map
 }
 
-/// Resolve a desktop entry `Icon=` value to an existing file path if possible.
-fn resolve_icon(value: &str) -> Option<String> {
+fn is_icon_file(name: &str) -> bool {
+    matches!(
+        name.rsplit_once('.').map(|(_, e)| e),
+        Some("png" | "svg" | "xpm" | "jpg" | "jpeg" | "webp" | "ico")
+    )
+}
+
+/// Resolve an Icon= value to an absolute path using the pre-built map.
+/// Absolute paths with a valid extension are accepted as-is.
+fn resolve_icon(value: &str, icon_map: &HashMap<String, PathBuf>) -> Option<String> {
     let value = value.trim();
     if value.is_empty() {
         return None;
     }
+
     let p = Path::new(value);
     if p.is_absolute() {
+        if is_icon_file(value) && p.is_file() {
+            return Some(value.to_string());
+        }
         for ext in ["png", "svg", "xpm", "jpg", "jpeg", "webp", "ico"] {
             let cand = p.with_extension(ext);
             if cand.is_file() {
                 return Some(cand.to_string_lossy().into_owned());
             }
         }
-        // Accept the bare path only if it already has a recognized image extension.
-        if let Some(e) = p.extension().and_then(|e| e.to_str()) {
-            if matches!(e, "png" | "svg" | "xpm" | "jpg" | "jpeg" | "webp" | "ico") && p.is_file()
-            {
-                return Some(p.to_string_lossy().into_owned());
-            }
-        }
         return None;
     }
 
-    // Otherwise search icon theme directories. We do a bounded recursive scan
-    // for a file whose stem matches the requested name.
-    for root in icon_dirs() {
-        if let Some(found) = search_icon(&root, value) {
-            return Some(found);
-        }
-    }
-    None
+    // Try the exact name first (Icon=firefox), then fall back to the stem in
+    // case the entry wrote an explicit extension (Icon=firefox.svg).
+    let stem = value.rsplit_once('.').map_or(value, |(s, _)| s);
+    icon_map
+        .get(value)
+        .or_else(|| icon_map.get(stem))
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
-fn search_icon(root: &Path, name: &str) -> Option<String> {
-    // Skip known scale/cached dirs to bound the search.
-    let mut stack = vec![root.to_path_buf()];
-    let mut visited = 0usize;
-    while let Some(dir) = stack.pop() {
-        visited += 1;
-        if visited > 4000 {
-            return None;
-        }
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ft = entry.file_type();
-            if ft.as_ref().map(|t| t.is_dir()).unwrap_or(false) {
-                if entry.file_name() != "cursors" && entry.file_name() != "scalable" {
-                    stack.push(path);
-                }
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-                continue;
-            };
-            if stem == name {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if matches!(ext, "png" | "svg" | "xpm" | "jpg" | "jpeg" | "webp" | "ico") {
-                        return Some(path.to_string_lossy().into_owned());
-                    }
-                }
-            }
-        }
-    }
-    None
-}
+// ---------------------------------------------------------------------------
+// .desktop file parsing
+// ---------------------------------------------------------------------------
 
 fn parse_bool(v: Option<&str>, def: bool) -> bool {
     match v.map(|s| s.trim().to_lowercase()).as_deref() {
@@ -139,8 +179,11 @@ fn parse_bool(v: Option<&str>, def: bool) -> bool {
     }
 }
 
-/// Parse a single `.desktop` file into an optional `AppEntry`.
-fn parse_desktop(path: &Path, id: &str) -> Option<AppEntry> {
+fn parse_desktop(
+    path: &Path,
+    id: &str,
+    icon_map: &HashMap<String, PathBuf>,
+) -> Option<AppEntry> {
     let content = fs::read_to_string(path).ok()?;
     let mut name = None::<String>;
     let mut exec = None::<String>;
@@ -149,7 +192,6 @@ fn parse_desktop(path: &Path, id: &str) -> Option<AppEntry> {
     let mut no_display = false;
     let mut is_application = false;
     let mut in_desktop = false;
-    // Locale name keys take priority: Name[zh_CN], Name[zh], etc.
     let mut localized_names: Vec<String> = Vec::new();
 
     for raw_line in content.lines() {
@@ -186,31 +228,34 @@ fn parse_desktop(path: &Path, id: &str) -> Option<AppEntry> {
     if !is_application {
         return None;
     }
-    // Prefer the most specific localized name we happen to find.
     let name_str = localized_names.pop().or(name)?;
-
     let exec_value = exec?;
-    let (pinyin_full, pinyin_abbr) = pinyin_fields(&name_str);
+    let (pinyin_full, pinyin_abbr) = matcher::pinyin_fields(&name_str);
 
     Some(AppEntry {
         id: id.to_string(),
         name: name_str,
         exec: exec_value,
-        icon_path: icon.and_then(|i| resolve_icon(&i)),
+        icon_path: icon.and_then(|i| resolve_icon(&i, icon_map)),
         hidden: hidden || no_display,
         pinyin_full,
         pinyin_abbr,
     })
 }
 
-/// Scan all `.desktop` files and build the full app list.
-pub fn scan_apps() -> Vec<AppEntry> {
+// ---------------------------------------------------------------------------
+// Full scan (icon map built once, then all desktop files resolved via it)
+// ---------------------------------------------------------------------------
+
+fn scan_apps() -> Vec<AppEntry> {
+    let icon_map = build_icon_map();
+
     let mut entries = Vec::new();
-    let mut seen_ids = HashSet::new();
+    let mut seen_ids: HashSet<String> = HashSet::new();
     for dir in desktop_dirs() {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         let mut files: Vec<_> = rd.flatten().map(|e| e.path()).collect();
-        files.sort(); // deterministic order
+        files.sort();
         for path in files {
             if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
                 continue;
@@ -221,9 +266,9 @@ pub fn scan_apps() -> Vec<AppEntry> {
                 .unwrap_or_default()
                 .to_string();
             if !seen_ids.insert(id.clone()) {
-                continue; // already handled by a higher-priority dir
+                continue;
             }
-            if let Some(entry) = parse_desktop(&path, &id) {
+            if let Some(entry) = parse_desktop(&path, &id, &icon_map) {
                 entries.push(entry);
             }
         }
@@ -231,80 +276,103 @@ pub fn scan_apps() -> Vec<AppEntry> {
     entries
 }
 
-/// Load the app list, preferring the on-disk cache and lazily refreshing it.
+// ---------------------------------------------------------------------------
+// Cache with true background refresh
+// ---------------------------------------------------------------------------
+
 pub fn load_apps() -> Vec<AppEntry> {
-    // Fast path: read the cache and trust it for this run.
     if let Some(cached) = indexer::load_cache() {
-        // Fire-and-forget a background rescan that refreshes the cache for next time.
-        let fresh = scan_apps();
-        if !fresh.is_empty() {
-            indexer::save_cache(&fresh);
-        }
+        // Real background refresh — doesn't block the main thread.
+        std::thread::spawn(|| {
+            let fresh = scan_apps();
+            if !fresh.is_empty() {
+                indexer::save_cache(&fresh);
+            }
+        });
         return cached;
     }
+    // Cold start: scan synchronously (only happens once).
     let apps = scan_apps();
     indexer::save_cache(&apps);
     apps
 }
 
-/// Launch a `.desktop` Exec string, detached from this process.
-fn launch_exec(exec: &str) -> bool {
-    // Strip desktop field codes and split tokens.
+// ---------------------------------------------------------------------------
+// Launch helper
+// ---------------------------------------------------------------------------
+
+fn launch_exec(exec: &str) {
     let cleaned: String = exec
         .split_whitespace()
         .filter(|tok| !tok.starts_with('%'))
         .collect::<Vec<_>>()
         .join(" ");
     let mut parts = cleaned.split_whitespace();
-    let Some(program) = parts.next() else { return false };
+    let Some(program) = parts.next() else { return };
     let args: Vec<&str> = parts.collect();
-    match Command::new(program).args(&args).spawn() {
-        // The child is reparented to init once we exit; no wait is required.
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    let _ = Command::new(program).args(&args).spawn();
 }
 
-/// Build the Slint UI and run the single-shot Linux loop.
+// ---------------------------------------------------------------------------
+// Run: load → build UI → wire callbacks → show
+// ---------------------------------------------------------------------------
+
 pub fn run() {
+    let t0 = std::time::Instant::now();
     let apps = load_apps();
+    let app_count = apps.len();
+    let t_load = t0.elapsed();
 
     let ui = LauncherWindow::new().unwrap();
+    let t_new = t0.elapsed();
     let weak = ui.as_weak();
 
-    // Pre-seed the list with everything.
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = matcher::MatcherScratch::default();
-    ui.set_items(build_model(&apps, &[]));
+    let image_cache = crate::launcher::AppImageCache::new();
+    let initial_idxs: Vec<usize> = (0..apps.len()).collect();
+    ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
+    let t_model = t0.elapsed();
+    if std::env::var("STOOLS_DEBUG").is_ok() {
+        eprintln!("[stools] initial-n={}", ui.get_items().row_count());
+    }
 
-    // Refresh the visible list based on the current query.
     let search_weak = weak.clone();
     ui.on_search_changed(move |query| {
-        let ui = search_weak.upgrade();
-        let Some(ui) = ui else { return };
-        let query = query.to_string();
-        let idxs = matcher::rank(&apps, &query, &mut matcher, &mut scratch);
-        ui.set_items(build_model(&apps, &idxs));
+        let Some(ui) = search_weak.upgrade() else { return };
+        let st = std::time::Instant::now();
+        let idxs = matcher::rank(&apps, &query.to_string(), &mut matcher, &mut scratch);
+        ui.set_items(build_model(&apps, &idxs, &image_cache));
         ui.set_selected_index(0);
+        if std::env::var("STOOLS_DEBUG").is_ok() {
+            eprintln!("[stools] search-rebuild={:?} n={}", st.elapsed(), ui.get_items().row_count());
+        }
     });
 
     let exec_weak = weak.clone();
     ui.on_item_executed(move |index| {
-        if let Some(ui) = exec_weak.upgrade() {
-            let items = ui.get_items();
-            if let Some(item) = items.row_data(index as usize) {
-                let exec = item.exec.to_string();
-                launch_exec(&exec);
-            }
-            let _ = slint::quit_event_loop();
+        let Some(ui) = exec_weak.upgrade() else { return };
+        if let Some(item) = ui.get_items().row_data(index as usize) {
+            launch_exec(&item.exec.to_string());
         }
-    });
-
-    ui.on_escape_pressed(move || {
         let _ = slint::quit_event_loop();
     });
 
-    // Let the window manager place us (float + center via hyprland/sway rules).
+    ui.on_escape_pressed(|| {
+        let _ = slint::quit_event_loop();
+    });
+
     ui.show().unwrap();
+    let t_show = t0.elapsed();
+    if std::env::var("STOOLS_DEBUG").is_ok() {
+        eprintln!(
+            "[stools] load={:?} new={:?} model={:?} show={:?} apps={}",
+            t_load,
+            t_new,
+            t_model,
+            t_show,
+            app_count
+        );
+    }
     slint::run_event_loop_until_quit().unwrap();
 }

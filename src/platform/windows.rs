@@ -112,14 +112,16 @@ pub fn run() {
 
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = crate::core::matcher::MatcherScratch::default();
-    ui.set_items(build_model(&apps, &[]));
+    let image_cache = crate::launcher::AppImageCache::new();
+    let initial_idxs: Vec<usize> = (0..apps.len()).collect();
+    ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
 
     // Live filtering while typing.
     let search_weak = weak.clone();
     ui.on_search_changed(move |query| {
         let Some(ui) = search_weak.upgrade() else { return };
         let idxs = rank(&apps, &query, &mut matcher, &mut scratch);
-        ui.set_items(build_model(&apps, &idxs));
+        ui.set_items(build_model(&apps, &idxs, &image_cache));
         ui.set_selected_index(0);
     });
 

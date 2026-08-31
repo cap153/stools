@@ -1,36 +1,70 @@
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
 use slint::{Image, ModelRc, SharedString, VecModel};
 
 use crate::core::model::AppEntry;
 
 slint::include_modules!();
 
-/// Convert an indexed entry into its Slint display representation.
-pub fn to_ui_item(a: &AppEntry) -> AppItem {
+/// Only this many items get their model entries built (and, transitively, their
+/// icons loaded). The Slint window only shows ~10 rows, so 30 gives some scroll
+/// headroom while keeping both startup and per-keystroke rebuilds cheap.
+const MAX_VISIBLE_ITEMS: usize = 30;
+
+/// Decoded icons live here for the whole session. Slint `Image` is a cheap
+/// clone over already-decoded data, so rebuilding the model on every keystroke
+/// reuses these instead of re-reading + re-decoding files from disk.
+pub struct AppImageCache {
+    map: RefCell<HashMap<PathBuf, Image>>,
+}
+
+impl Default for AppImageCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppImageCache {
+    pub fn new() -> Self {
+        Self {
+            map: RefCell::new(HashMap::new()),
+        }
+    }
+
+    fn get(&self, path: &Path) -> Image {
+        if let Some(img) = self.map.borrow().get(path) {
+            return img.clone();
+        }
+        let img = Image::load_from_path(path).unwrap_or_else(|_| Image::default());
+        self.map.borrow_mut().insert(path.to_path_buf(), img.clone());
+        img
+    }
+}
+
+pub fn to_ui_item(a: &AppEntry, cache: &AppImageCache) -> AppItem {
     AppItem {
         id: SharedString::from(a.id.as_str()),
         name: SharedString::from(a.name.as_str()),
         exec: SharedString::from(a.exec.as_str()),
         icon: match &a.icon_path {
-            Some(p) => Image::load_from_path(std::path::Path::new(p)).unwrap_or_default(),
+            Some(p) => cache.get(Path::new(p)),
             None => Image::default(),
         },
     }
 }
 
-/// Build a Slint model from either the full app list or a set of ranked indexes.
-/// Hidden entries are always filtered out for display.
-pub fn build_model(apps: &[AppEntry], idxs: &[usize]) -> ModelRc<AppItem> {
-    let items: Vec<AppItem> = if idxs.is_empty() {
-        apps.iter()
-            .filter(|a| !a.hidden)
-            .map(to_ui_item)
-            .collect()
-    } else {
-        idxs.iter()
-            .filter_map(|&i| apps.get(i))
-            .filter(|a| !a.hidden)
-            .map(to_ui_item)
-            .collect()
-    };
+/// Build a Slint model from a set of ranked indexes. Hidden entries are
+/// filtered out first, then capped to the visible window, so a "no matches"
+/// search yields an empty model (rather than falling back to the full list).
+pub fn build_model(apps: &[AppEntry], idxs: &[usize], cache: &AppImageCache) -> ModelRc<AppItem> {
+    let items: Vec<AppItem> = idxs
+        .iter()
+        .filter_map(|&i| apps.get(i))
+        .filter(|a| !a.hidden)
+        .take(MAX_VISIBLE_ITEMS)
+        .map(|a| to_ui_item(a, cache))
+        .collect();
     ModelRc::new(VecModel::from(items))
 }

@@ -106,6 +106,27 @@ src/
     windows.rs      # Windows tray + global-hotkey daemon
 ```
 
+## Debugging
+
+Set `STOOLS_DEBUG=1` to print startup timing and live search statistics to
+`stderr`. Each search outputs the rebuild time and how many entries matched, so
+you can spot a slow cold start or an unexpected empty/over-populated result set.
+
+```sh
+STOOLS_DEBUG=1 stools
+# [stools] load=89.4µs new=26.4ms model=37.1ms show=46.2ms apps=159   <- startup
+# [stools] initial-n=30                                                <- seeded rows
+# [stools] search-rebuild=48.2µs n=10                                  <- per keystroke
+```
+
+Field meanings:
+
+- `load` — time to load the app list (cache read on warm start, full scan on cold start).
+- `new` — Slint window / GPU backend initialization (fixed per-process cost).
+- `model` / `show` — building the initial visible list and showing the window.
+- `search-rebuild` — time to re-rank and rebuild the list for one keystroke, and
+  how many matching entries (`n`) were produced. `n=0` means no match.
+
 ## Tests
 
 ```sh
