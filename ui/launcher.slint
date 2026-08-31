@@ -1,5 +1,3 @@
-import { ListView } from "std-widgets.slint";
-
 export struct AppItem {
     id: string,
     name: string,
@@ -8,142 +6,153 @@ export struct AppItem {
 }
 
 export component LauncherWindow inherits Window {
-    // Fixed size, borderless, always on top. The window chrome is invisible so the
-    // `main_container` rectangle below is the only thing rendered.
-    width: 560px;
-    height: 500px;
+    width: 500px;
+    height: 580px;
     no-frame: true;
     always-on-top: true;
     background: transparent;
     default-font-family: "JetBrains Mono";
 
-    // --- Public data model and callbacks ------------------------------------
     in-out property <[AppItem]> items: [];
     in-out property <int> selected_index: 0;
+    in-out property <string> query: "";
+
     callback search_changed(string);
     callback item_executed(int);
     callback escape_pressed();
 
-    // The text currently typed in the search box. Exposed so the host can read it
-    // (e.g. to restore it on Windows before showing the window).
-    in-out property <string> query: "";
+    private property <length> item_height: 34px;
+    private property <length> item_spacing: 2px;
+    private property <length> row_total_height: item_height + item_spacing;
+    private property <length> list_view_height: 500px;
 
-    // Called by the host right before showing the window (mainly Windows): focuses
-    // the input and selects all its text so typing replaces the previous query.
+    function ensure_visible(idx: int) {
+        let item_top = idx * root.row_total_height;
+        let item_bottom = item_top + root.item_height;
+
+        if (item_top < -flick.viewport-y) {
+            flick.viewport-y = -item_top;
+        }
+        if (item_bottom > -flick.viewport-y + root.list_view_height) {
+            flick.viewport-y = -(item_bottom - root.list_view_height);
+        }
+    }
+
     public function prepare_show() {
         input.select-all();
         input.focus();
+        flick.viewport-y = 0px;
     }
 
     forward-focus: input;
 
-    // --- Main panel ----------------------------------------------------------
     main_container := Rectangle {
-        background: #1e1e2eE6; // dark, mostly opaque (alpha ~0.9)
+        width: 100%;
+        height: 100%;
+        background: #282a36dd;
         border-radius: 12px;
-        border-width: 1px;
-        border-color: #89b4fa66;
+        border-width: 1.5px;
+        border-color: #bd93f9;
         clip: true;
 
         VerticalLayout {
-            padding: 14px;
-            spacing: 10px;
+            padding: 12px;
+            spacing: 6px;
 
-            // Input row: ">" prompt + search box
             HorizontalLayout {
-                spacing: 8px;
-                height: 38px;
+                height: 32px;
+                spacing: 10px;
 
                 Text {
                     text: ">";
-                    color: #89b4fa;
-                    font-size: 20px;
+                    color: #586E75;
+                    font-size: 18px;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
 
-                Rectangle {
-                    height: 38px;
+                input := TextInput {
                     horizontal-stretch: 1;
-                    background: transparent;
+                    font-size: 15px;
+                    color: #f8f8f2;
+                    selection-background-color: #bd93f9;
+                    selection-foreground-color: #282a36;
+                    single-line: true;
+                    vertical-alignment: center;
 
-                    // Placeholder drawn behind the (transparent) input.
-                    placeholder := Text {
-                        x: 2px;
-                        text: root.query == "" ? "Search applications..." : "";
-                        color: #6c7086;
-                        font-size: 16px;
-                        vertical-alignment: center;
+                    edited => {
+                        root.query = self.text;
+                        root.search_changed(self.text);
+                        root.selected_index = 0;
+                        flick.viewport-y = 0px;
                     }
 
-                    input := TextInput {
-                        width: parent.width;
-                        height: parent.height;
-                        font-size: 16px;
-                        color: #cdd6f4;
-                        selection-background-color: #89b4fa;
-                        selection-foreground-color: #1e1e2e;
-                        single-line: true;
-
-                        edited => {
-                            root.query = self.text;
-                            root.search_changed(self.text);
-                            root.selected_index = 0;
+                    key-pressed(event) => {
+                        if event.text == Key.Escape {
+                            root.escape_pressed();
+                            return accept;
                         }
-
-                        key-pressed(event) => {
-                            if event.text == Key.Escape {
-                                root.escape_pressed();
-                                return accept;
-                            }
-                            if event.text == Key.DownArrow {
+                        if event.text == Key.DownArrow {
+                            if root.items.length > 0 {
                                 root.selected_index = Math.min(root.selected_index + 1, root.items.length - 1);
-                                return accept;
+                                root.ensure_visible(root.selected_index);
                             }
-                            if event.text == Key.UpArrow {
-                                root.selected_index = Math.max(root.selected_index - 1, 0);
-                                return accept;
-                            }
-                            if event.text == Key.Return {
-                                if root.items.length > 0 {
-                                    root.item_executed(root.selected_index);
-                                }
-                                return accept;
-                            }
-                            return reject;
+                            return accept;
                         }
+                        if event.text == Key.UpArrow {
+                            if root.items.length > 0 {
+                                root.selected_index = Math.max(root.selected_index - 1, 0);
+                                root.ensure_visible(root.selected_index);
+                            }
+                            return accept;
+                        }
+                        if event.text == Key.Return {
+                            if root.items.length > 0 {
+                                root.item_executed(root.selected_index);
+                            }
+                            return accept;
+                        }
+                        return reject;
                     }
                 }
             }
 
-            // Result list
-            list := ListView {
-                preferred-height: 420px;
+            flick := Flickable {
+                height: root.list_view_height;
+                viewport-height: root.items.length * root.row_total_height;
 
                 for item[index] in root.items : Rectangle {
-                    height: 40px;
-                    border-radius: 6px;
-                    background: root.selected_index == index ? #45475aCC : transparent;
+                    y: index * root.row_total_height;
+                    width: flick.width;
+                    height: root.item_height;
+                    border-radius: 0px;
+                    background: root.selected_index == index ? #44475add : transparent;
 
-                    HorizontalLayout {
-                        padding-left: 8px;
-                        padding-right: 8px;
-                        spacing: 12px;
+                    Rectangle {
+                        x: 6px;
+                        y: (parent.height - self.height) / 2;
+                        width: 20px;
+                        height: 20px;
+                        background: transparent;
 
                         Image {
                             source: item.icon;
-                            width: 22px;
-                            height: 22px;
-                            vertical-alignment: center;
+                            width: 100%;
+                            height: 100%;
+                            image-fit: contain;
                         }
+                    }
 
-                        Text {
-                            text: item.name;
-                            color: root.selected_index == index ? #f5e0dc : #bac2de;
-                            font-size: 15px;
-                            vertical-alignment: center;
-                            overflow: elide;
-                        }
+                    Text {
+                        x: 36px;
+                        y: 0px;
+                        width: parent.width - 42px;
+                        height: parent.height;
+                        text: item.name;
+                        color: #f8f8f2;
+                        font-size: 14.5px;
+                        vertical-alignment: center;
+                        overflow: elide;
                     }
 
                     TouchArea {
