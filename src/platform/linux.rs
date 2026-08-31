@@ -1,13 +1,17 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
+use crate::core::history::HistoryManager;
 use crate::core::indexer;
 use crate::core::matcher;
-use crate::core::model::AppEntry;
+use crate::core::model::{AppEntry, EntryKind};
+use crate::core::path_utils;
 use crate::launcher::{build_model, LauncherWindow};
 
 use slint::{ComponentHandle, Model};
@@ -16,8 +20,13 @@ use slint::{ComponentHandle, Model};
 // Desktop file directories
 // ---------------------------------------------------------------------------
 
-fn desktop_dirs() -> Vec<PathBuf> {
+fn desktop_dirs(custom_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+    // Custom dirs passed on the command line come first -- they may hold
+    // .desktop files the user added ad-hoc (e.g. a copy under their home).
+    for cd in custom_dirs {
+        dirs.push(cd.clone());
+    }
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() {
         dirs.push(PathBuf::from(&home).join(".local/share/applications"));
@@ -181,7 +190,7 @@ fn parse_bool(v: Option<&str>, def: bool) -> bool {
 
 fn parse_desktop(
     path: &Path,
-    id: &str,
+    _id: &str,
     icon_map: &HashMap<String, PathBuf>,
 ) -> Option<AppEntry> {
     let content = fs::read_to_string(path).ok()?;
@@ -233,26 +242,96 @@ fn parse_desktop(
     let (pinyin_full, pinyin_abbr) = matcher::pinyin_fields(&name_str);
 
     Some(AppEntry {
-        id: id.to_string(),
+        // id is the .desktop file's real path so a later same-name collision can
+        // show where this entry came from (used as the subtitle origin).
+        id: path.to_string_lossy().into_owned(),
         name: name_str,
         exec: exec_value,
         icon_path: icon.and_then(|i| resolve_icon(&i, icon_map)),
         hidden: hidden || no_display,
         pinyin_full,
         pinyin_abbr,
+        kind: EntryKind::Desktop,
+        subtitle: None,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Binary / executable scanning
+// ---------------------------------------------------------------------------
+
+/// Scan the given directories for executable files and turn them into
+/// `AppEntry` records. Returns a Vec of (entry, absolute_path) so callers can
+/// Scan the given directories for executable files and turn them into
+/// `AppEntry` records. Entries are de-duplicated by *canonical path* so the
+/// same physical file reached via a symlinked directory (e.g. /bin -> /usr/bin)
+/// is only listed once, but genuinely distinct paths sharing a name are all kept
+/// (the caller attaches a path subtitle to disambiguate them).
+fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
+    let mut entries = Vec::new();
+    let mut seen_paths: HashSet<String> = HashSet::new();
+
+    for dir in dirs {
+        let Ok(rd) = fs::read_dir(dir) else { continue };
+        for entry in rd.flatten() {
+            let path = entry.path();
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            // Must be user/group/other executable
+            if meta.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue
+            };
+            // Skip hidden files and common non-launchable helpers
+            if name.starts_with('.') {
+                continue;
+            }
+
+            let (pinyin_full, pinyin_abbr) = matcher::pinyin_fields(name);
+            let id = format!("bin:{}", path.to_string_lossy());
+            // Canonicalize so symlinked directories (e.g. /bin -> /usr/bin) don't
+            // yield the same physical file twice.
+            let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            let canon_str = canon.to_string_lossy().into_owned();
+            if !seen_paths.insert(canon_str) {
+                continue;
+            }
+            // subtitle is left empty here; the caller marks it only when an entry's
+            // name collides with another entry from a different path.
+            entries.push(AppEntry {
+                id,
+                name: name.to_string(),
+                exec: path.to_string_lossy().into_owned(),
+                icon_path: None,
+                hidden: false,
+                pinyin_full,
+                pinyin_abbr,
+                kind: EntryKind::Binary,
+                subtitle: None,
+            });
+        }
+    }
+
+    entries
 }
 
 // ---------------------------------------------------------------------------
 // Full scan (icon map built once, then all desktop files resolved via it)
 // ---------------------------------------------------------------------------
 
-fn scan_apps() -> Vec<AppEntry> {
+fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> {
     let icon_map = build_icon_map();
 
     let mut entries = Vec::new();
+    // Keyed by "<dir>:<filename>" so a .desktop that exists in several dirs
+    // (e.g. a copy in the user's home vs. the system one) is not silently
+    // collapsed -- both show up and can be told apart.
     let mut seen_ids: HashSet<String> = HashSet::new();
-    for dir in desktop_dirs() {
+    for dir in desktop_dirs(custom_dirs) {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         let mut files: Vec<_> = rd.flatten().map(|e| e.path()).collect();
         files.sort();
@@ -265,7 +344,8 @@ fn scan_apps() -> Vec<AppEntry> {
                 .and_then(|s| s.to_str())
                 .unwrap_or_default()
                 .to_string();
-            if !seen_ids.insert(id.clone()) {
+            let unique_id = format!("{}:{}", dir.display(), id);
+            if !seen_ids.insert(unique_id) {
                 continue;
             }
             if let Some(entry) = parse_desktop(&path, &id, &icon_map) {
@@ -273,6 +353,35 @@ fn scan_apps() -> Vec<AppEntry> {
             }
         }
     }
+
+    // Binaries go after desktop entries (lower priority). They are *not*
+    // de-duplicated: if a command shares a name with a desktop entry or another
+    // binary in a different directory, both are kept and distinguished by their
+    // path subtitle below.
+    entries.extend(scan_binaries(binary_dirs));
+
+    // Mark the path subtitle on entries whose (case-insensitive) name also
+    // belongs to another entry from a different path -- both desktop apps and
+    // binaries show where they live so the duplicates can be told apart. Unique
+    // names show nothing, keeping the list clean.
+    let mut name_counts: HashMap<String, usize> = HashMap::new();
+    for e in &entries {
+        *name_counts.entry(e.name.to_lowercase()).or_insert(0) += 1;
+    }
+    for e in &mut entries {
+        if name_counts.get(&e.name.to_lowercase()).copied().unwrap_or(0) > 1 {
+            let origin = match e.kind {
+                // Binaries: the executable path itself.
+                EntryKind::Binary => Path::new(&e.exec),
+                // Desktop apps: the .desktop file path (kept in `id`).
+                EntryKind::Desktop => Path::new(&e.id),
+            };
+            e.subtitle = Some(path_utils::prettify_path(origin));
+        } else {
+            e.subtitle = None;
+        }
+    }
+
     entries
 }
 
@@ -280,11 +389,23 @@ fn scan_apps() -> Vec<AppEntry> {
 // Cache with true background refresh
 // ---------------------------------------------------------------------------
 
-pub fn load_apps() -> Vec<AppEntry> {
+/// `custom_dirs` are the directories passed on the command line (both `.desktop`
+/// files and executables are picked up there); `binary_dirs` are the merged
+/// executable-search paths. When the user passed custom dirs we scan
+/// synchronously so a just-added `.desktop` shows up immediately instead of
+/// serving a stale cache.
+pub fn load_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> {
+    if !custom_dirs.is_empty() {
+        let apps = scan_apps(custom_dirs, binary_dirs);
+        indexer::save_cache(&apps);
+        return apps;
+    }
+
+    let dirs = binary_dirs.to_vec();
     if let Some(cached) = indexer::load_cache() {
         // Real background refresh — doesn't block the main thread.
-        std::thread::spawn(|| {
-            let fresh = scan_apps();
+        std::thread::spawn(move || {
+            let fresh = scan_apps(&[], &dirs);
             if !fresh.is_empty() {
                 indexer::save_cache(&fresh);
             }
@@ -292,7 +413,7 @@ pub fn load_apps() -> Vec<AppEntry> {
         return cached;
     }
     // Cold start: scan synchronously (only happens once).
-    let apps = scan_apps();
+    let apps = scan_apps(&[], binary_dirs);
     indexer::save_cache(&apps);
     apps
 }
@@ -319,7 +440,22 @@ fn launch_exec(exec: &str) {
 
 pub fn run() {
     let t0 = std::time::Instant::now();
-    let apps = load_apps();
+    let cli_dirs: Vec<String> = env::args().skip(1).collect();
+    let binary_dirs = path_utils::merge_binary_dirs(&cli_dirs);
+    // Custom dirs are the user's explicit CLI args (with `~` expanded); they are
+    // scanned for BOTH .desktop files and executables.
+    let custom_dirs: Vec<PathBuf> = cli_dirs
+        .iter()
+        .filter_map(|s| {
+            let expanded = if let Some(rest) = s.strip_prefix('~') {
+                dirs::home_dir().map(|h| h.join(rest.trim_start_matches('/')))
+            } else {
+                Some(PathBuf::from(s))
+            }?;
+            expanded.is_dir().then_some(expanded)
+        })
+        .collect();
+    let apps = load_apps(&custom_dirs, &binary_dirs);
     let app_count = apps.len();
     let t_load = t0.elapsed();
 
@@ -330,7 +466,14 @@ pub fn run() {
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = matcher::MatcherScratch::default();
     let image_cache = crate::launcher::AppImageCache::new();
-    let initial_idxs: Vec<usize> = (0..apps.len()).collect();
+    let history = std::rc::Rc::new(std::cell::RefCell::new(HistoryManager::load()));
+    let initial_idxs: Vec<usize> = matcher::rank(
+        &apps,
+        "",
+        &mut matcher,
+        &mut scratch,
+        Some(&history.borrow().records),
+    );
     ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
     let t_model = t0.elapsed();
     if std::env::var("STOOLS_DEBUG").is_ok() {
@@ -338,21 +481,31 @@ pub fn run() {
     }
 
     let search_weak = weak.clone();
-    ui.on_search_changed(move |query| {
-        let Some(ui) = search_weak.upgrade() else { return };
-        let st = std::time::Instant::now();
-        let idxs = matcher::rank(&apps, &query.to_string(), &mut matcher, &mut scratch);
-        ui.set_items(build_model(&apps, &idxs, &image_cache));
-        ui.set_selected_index(0);
-        if std::env::var("STOOLS_DEBUG").is_ok() {
-            eprintln!("[stools] search-rebuild={:?} n={}", st.elapsed(), ui.get_items().row_count());
-        }
-    });
+    {
+        let history = history.clone();
+        ui.on_search_changed(move |query| {
+            let Some(ui) = search_weak.upgrade() else { return };
+            let st = std::time::Instant::now();
+            let idxs = matcher::rank(
+                &apps,
+                &query.to_string(),
+                &mut matcher,
+                &mut scratch,
+                Some(&history.borrow().records),
+            );
+            ui.set_items(build_model(&apps, &idxs, &image_cache));
+            ui.set_selected_index(0);
+            if std::env::var("STOOLS_DEBUG").is_ok() {
+                eprintln!("[stools] search-rebuild={:?} n={}", st.elapsed(), ui.get_items().row_count());
+            }
+        });
+    }
 
     let exec_weak = weak.clone();
     ui.on_item_executed(move |index| {
         let Some(ui) = exec_weak.upgrade() else { return };
         if let Some(item) = ui.get_items().row_data(index as usize) {
+            history.borrow_mut().record_hit(&item.id.to_string());
             launch_exec(&item.exec.to_string());
         }
         let _ = slint::quit_event_loop();

@@ -44,6 +44,7 @@ impl AppImageCache {
 }
 
 pub fn to_ui_item(a: &AppEntry, cache: &AppImageCache) -> AppItem {
+    let subtitle = a.subtitle.as_deref().unwrap_or("");
     AppItem {
         id: SharedString::from(a.id.as_str()),
         name: SharedString::from(a.name.as_str()),
@@ -52,6 +53,7 @@ pub fn to_ui_item(a: &AppEntry, cache: &AppImageCache) -> AppItem {
             Some(p) => cache.get(Path::new(p)),
             None => Image::default(),
         },
+        subtitle: subtitle.into(),
     }
 }
 

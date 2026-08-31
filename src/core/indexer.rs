@@ -6,7 +6,7 @@ use super::model::AppEntry;
 /// Linux writes its index to disk so the launcher starts under ~2ms.
 /// Windows does not cache (it enumerates Start Menu on demand).
 #[cfg(target_os = "linux")]
-pub const CACHE_NAME: &str = "stools-apps-v1.bin";
+pub const CACHE_NAME: &str = "stools-apps-v4.bin";
 
 #[cfg(target_os = "linux")]
 fn cache_dir() -> PathBuf {

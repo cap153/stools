@@ -11,7 +11,8 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::core::matcher::{pinyin_fields, rank};
-use crate::core::model::AppEntry;
+use crate::core::history::HistoryManager;
+use crate::core::model::{AppEntry, EntryKind};
 use crate::launcher::{build_model, LauncherWindow};
 
 use slint::{ComponentHandle, Model};
@@ -72,6 +73,8 @@ pub fn scan_apps() -> Vec<AppEntry> {
             hidden: false,
             pinyin_full,
             pinyin_abbr,
+            kind: EntryKind::Desktop,
+            subtitle: None,
         });
     }
     entries
@@ -113,17 +116,33 @@ pub fn run() {
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = crate::core::matcher::MatcherScratch::default();
     let image_cache = crate::launcher::AppImageCache::new();
-    let initial_idxs: Vec<usize> = (0..apps.len()).collect();
+    let history = std::rc::Rc::new(std::cell::RefCell::new(HistoryManager::load()));
+    let initial_idxs: Vec<usize> = rank(
+        &apps,
+        "",
+        &mut matcher,
+        &mut scratch,
+        Some(&history.borrow().records),
+    );
     ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
 
     // Live filtering while typing.
     let search_weak = weak.clone();
-    ui.on_search_changed(move |query| {
-        let Some(ui) = search_weak.upgrade() else { return };
-        let idxs = rank(&apps, &query, &mut matcher, &mut scratch);
-        ui.set_items(build_model(&apps, &idxs, &image_cache));
-        ui.set_selected_index(0);
-    });
+    {
+        let history = history.clone();
+        ui.on_search_changed(move |query| {
+            let Some(ui) = search_weak.upgrade() else { return };
+            let idxs = rank(
+                &apps,
+                &query,
+                &mut matcher,
+                &mut scratch,
+                Some(&history.borrow().records),
+            );
+            ui.set_items(build_model(&apps, &idxs, &image_cache));
+            ui.set_selected_index(0);
+        });
+    }
 
     // Enter / click: launch the app and hide.
     ui.on_item_executed({
@@ -131,6 +150,7 @@ pub fn run() {
         move |index| {
             if let Some(ui) = weak.upgrade() {
                 if let Some(item) = ui.get_items().row_data(index as usize) {
+                    history.borrow_mut().record_hit(&item.id.to_string());
                     let _ = open::that_detached(item.exec.to_string());
                 }
                 hide_window(&ui);

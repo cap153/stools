@@ -1,6 +1,7 @@
 use nucleo_matcher::{Matcher, Utf32Str};
 use pinyin::ToPinyinMulti;
 
+use super::history::HistoryRecord;
 use super::model::AppEntry;
 
 /// Compute the full pinyin (syllables concatenated, no tones) and the initials
@@ -81,21 +82,56 @@ fn score(
 }
 
 /// Rank `items` against `query`, returning the indexes best-match first.
-/// An empty (or whitespace-only) query returns everything in the original order.
+/// If `history` is provided, recently-used items get a boost and empty queries
+/// sort by recency.
 pub fn rank(
     items: &[AppEntry],
     query: &str,
     matcher: &mut Matcher,
     scratch: &mut MatcherScratch,
+    history: Option<&std::collections::HashMap<String, HistoryRecord>>,
 ) -> Vec<usize> {
     let query = query.trim();
+
     if query.is_empty() {
-        return (0..items.len()).collect();
+        // Strict three-tier ordering: history (most recent first) → desktop apps
+        // → binaries, preserving original (scan) order within each tier.
+        let mut idxs: Vec<usize> = (0..items.len()).collect();
+        idxs.sort_by(|&a, &b| {
+            let ea = &items[a];
+            let eb = &items[b];
+
+            let ha = history.and_then(|h| h.get(&ea.id)).map_or(0u64, |r| r.last_used);
+            let hb = history.and_then(|h| h.get(&eb.id)).map_or(0u64, |r| r.last_used);
+
+            // Tier 1: entries with history sort by recency (newest first).
+            match (ha > 0, hb > 0) {
+                (true, true) => return hb.cmp(&ha),
+                (true, false) => return std::cmp::Ordering::Less,
+                (false, true) => return std::cmp::Ordering::Greater,
+                (false, false) => {}
+            }
+
+            // Tier 2: desktop apps sort before binaries.
+            match (&ea.kind, &eb.kind) {
+                (crate::core::model::EntryKind::Desktop, crate::core::model::EntryKind::Binary) => {
+                    return std::cmp::Ordering::Less;
+                }
+                (crate::core::model::EntryKind::Binary, crate::core::model::EntryKind::Desktop) => {
+                    return std::cmp::Ordering::Greater;
+                }
+                _ => {}
+            }
+
+            // Tier 3: stable within the same kind (original scan order).
+            a.cmp(&b)
+        });
+        return idxs;
     }
 
     let mut results: Vec<(usize, u16)> = Vec::with_capacity(items.len());
     for (i, entry) in items.iter().enumerate() {
-        if let Some(s) = score(
+        if let Some(mut s) = score(
             entry,
             matcher,
             query,
@@ -104,6 +140,19 @@ pub fn rank(
             &mut scratch.full_buf,
             &mut scratch.query_buf,
         ) {
+            // Desktop apps get a base priority so GUI software ranks above CLI
+            // tools of comparable match quality (without drowning out a strong
+            // exact CLI match).
+            if entry.kind == crate::core::model::EntryKind::Desktop {
+                s = s.saturating_add(150);
+            }
+            // History boost: frequently-used items climb higher.
+            if let Some(hist) = history {
+                if let Some(h) = hist.get(&entry.id) {
+                    let boost = (h.count.min(20) * 15) as u16;
+                    s = s.saturating_add(boost);
+                }
+            }
             results.push((i, s));
         }
     }
@@ -136,6 +185,8 @@ mod tests {
             hidden: false,
             pinyin_full: pf,
             pinyin_abbr: pa,
+            kind: crate::core::model::EntryKind::Desktop,
+            subtitle: None,
         }
     }
 
@@ -147,7 +198,7 @@ mod tests {
             .collect();
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scratch = MatcherScratch::default();
-        let idxs = rank(&apps, query, &mut matcher, &mut scratch);
+        let idxs = rank(&apps, query, &mut matcher, &mut scratch, None);
         idxs.into_iter().map(|i| apps[i].name.clone()).collect()
     }
 
@@ -192,5 +243,88 @@ mod tests {
     fn no_match_returns_empty() {
         let got = matching("zzzz", &["Firefox", "Alacritty"]);
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn empty_query_orders_desktop_before_binary() {
+        // Mixed kinds, no history: desktop apps must come before binaries,
+        // each in original scan order within its tier.
+        let mut apps: Vec<AppEntry> = ["Btop", "Zed"].iter().enumerate()
+            .map(|(i, n)| entry(&i.to_string(), n))
+            .collect();
+        let (f1, a1) = pinyin_fields("vimdot");
+        let (f2, a2) = pinyin_fields("true");
+        apps.push(AppEntry {
+            id: "bin:/usr/bin/vimdot".into(),
+            name: "vimdot".into(),
+            exec: "/usr/bin/vimdot".into(),
+            icon_path: None,
+            hidden: false,
+            pinyin_full: f1,
+            pinyin_abbr: a1,
+            kind: crate::core::model::EntryKind::Binary,
+            subtitle: None,
+        });
+        apps.push(AppEntry {
+            id: "bin:/usr/bin/true".into(),
+            name: "true".into(),
+            exec: "/usr/bin/true".into(),
+            icon_path: None,
+            hidden: false,
+            pinyin_full: f2,
+            pinyin_abbr: a2,
+            kind: crate::core::model::EntryKind::Binary,
+            subtitle: None,
+        });
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+        let idxs = rank(&apps, "", &mut matcher, &mut scratch, None);
+        let kinds: Vec<_> = idxs.iter().map(|&i| &apps[i].kind).collect();
+        assert_eq!(kinds[0], &crate::core::model::EntryKind::Desktop);
+        assert_eq!(kinds[1], &crate::core::model::EntryKind::Desktop);
+        assert_eq!(kinds[2], &crate::core::model::EntryKind::Binary);
+        assert_eq!(kinds[3], &crate::core::model::EntryKind::Binary);
+        // Names within each tier keep scan order (steam/sorted): Btop,Zed then vimdot,true
+        let names: Vec<_> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        assert_eq!(names, vec!["Btop", "Zed", "vimdot", "true"]);
+    }
+
+    #[test]
+    fn empty_query_sorts_most_recent_first() {
+        let apps: Vec<AppEntry> = ["Firefox", "Alacritty", "GIMP"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| entry(&i.to_string(), n))
+            .collect();
+        let mut hist = std::collections::HashMap::new();
+        hist.insert("1".into(), HistoryRecord { last_used: 300, count: 1 }); // Alacritty newest
+        hist.insert("0".into(), HistoryRecord { last_used: 100, count: 1 }); // Firefox older
+        // GIMP has no history → should sort after any-with-history, before/after by stability.
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+        let idxs = rank(&apps, "", &mut matcher, &mut scratch, Some(&hist));
+        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        // Most recent (Alacritty) first, then the older history entry, then the rest.
+        assert_eq!(names[0], "Alacritty");
+        assert_eq!(names[1], "Firefox");
+    }
+
+    #[test]
+    fn history_boost_promotes_frequent_item() {
+        // Both match query "a". Alacritty is used a lot → should rank above Firefox
+        // despite Firefox scoring better on the raw fuzzy match.
+        let apps: Vec<AppEntry> = ["Firefox", "Alacritty"].iter().enumerate()
+            .map(|(i, n)| entry(&i.to_string(), n))
+            .collect();
+        let mut hist = std::collections::HashMap::new();
+        hist.insert("1".into(), HistoryRecord { last_used: 10, count: 10 }); // Alacritty heavy use
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+        let idxs = rank(&apps, "a", &mut matcher, &mut scratch, Some(&hist));
+        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        assert_eq!(names[0], "Alacritty", "got {names:?}");
     }
 }

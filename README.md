@@ -5,6 +5,13 @@ A minimal, Fuzzel-style application launcher built with [Slint](https://slint.de
 - **Fixed-size, borderless, centered** window (no dynamic re-layout).
 - **Fuzzy matching** with pinyin support (`nucleo-matcher` + `pinyin`), including
   heteronym (multi-pronunciation) characters so e.g. `wyyyy` matches 网易云音乐.
+- **Binary & executable search**: alongside `.desktop` apps, launcher searches
+  common PATH directories (`~/.local/bin`, `~/.cargo/bin`, `/usr/bin`, …) and
+  any extra directories passed on the command line. Binaries rank *below*
+  desktop entries and display their (prettified) path as a grey subtitle.
+- **MRU history**: recently launched apps float to the top of the list, and
+  frequently-used items are boosted during fuzzy search. History is stored in
+  `~/.local/share/stools/history.json`.
 - **Linux**: single-shot stateless runner — launch via your window manager, pick
   an app, done. No tray, no built-in hotkey (your tiling WM binds a key).
   Indexes are cached to `~/.cache` for a near-instant cold start.
@@ -63,8 +70,24 @@ bindsym $mod+space exec stools
 | `Esc`    | Exit immediately                         |
 | typing   | Live fuzzy / pinyin filtering            |
 
-Note: the first run scans `.desktop` files and writes a cache; subsequent runs
-load the cache instantly and refresh it in the background.
+Note: the first run scans `.desktop` files *and* executable directories, writing a
+cache; subsequent runs load the cache instantly and refresh it in the background
+(so new installs appear automatically).
+
+### Searching binaries with custom paths
+
+By default the launcher scans a built-in list of common locations (`~/.local/bin`,
+`~/.cargo/bin`, `~/.deno/bin`, `~/.bun/bin`, `~/.zvm/bin`, `/usr/local/bin`,
+`/usr/bin`, `/home/linuxbrew/.linuxbrew/bin`, `/opt/rocm/bin`, …). To scan extra
+directories, pass them as arguments — `~` is expanded:
+
+```sh
+stools "$HOME/.zvm/bin" "/home/linuxbrew/.linuxbrew/bin"
+```
+
+Binary results are shown *below* desktop apps, and each shows its path as a grey
+subtitle. Paths are prettified for display (`/home/you/...` → `~`, `/opt/rocm` →
+`$ROCM_HOME`); paths too long to fit scroll across the row when selected.
 
 ## Windows usage
 
@@ -98,9 +121,11 @@ src/
   main.rs           # platform entry dispatch
   launcher.rs       # shared Slint model helpers
   core/
-    matcher.rs      # nucleo + pinyin fuzzy matching
+    matcher.rs      # nucleo + pinyin fuzzy matching (with MRU boost)
     model.rs        # AppEntry data model
-    indexer.rs      # Linux .desktop scanning + disk cache
+    indexer.rs      # on-disk cache
+    history.rs      # MRU history (JSON)
+    path_utils.rs   # PATH/binary dir resolution + path prettifier
   platform/
     linux.rs        # single-shot Linux flow
     windows.rs      # Windows tray + global-hotkey daemon

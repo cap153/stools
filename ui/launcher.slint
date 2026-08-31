@@ -3,6 +3,7 @@ export struct AppItem {
     name: string,
     exec: string,
     icon: image,
+    subtitle: string,
 }
 
 export component LauncherWindow inherits Window {
@@ -25,6 +26,9 @@ export component LauncherWindow inherits Window {
     private property <length> item_spacing: 2px;
     private property <length> row_total_height: item_height + item_spacing;
     private property <length> list_view_height: 500px;
+
+    // Marquee tuneables. marquee_gap is the empty space left behind the leading
+    // text before the trailing duplicate begins (seamless ribbon loop).
 
     function ensure_visible(idx: int) {
         let item_top = idx * root.row_total_height;
@@ -143,16 +147,65 @@ export component LauncherWindow inherits Window {
                         }
                     }
 
-                    Text {
+                    // Text row: name fills the left, subtitle sits at the right edge.
+                    HorizontalLayout {
                         x: 36px;
                         y: 0px;
                         width: parent.width - 42px;
                         height: parent.height;
-                        text: item.name;
-                        color: #f8f8f2;
-                        font-size: 14.5px;
-                        vertical-alignment: center;
-                        overflow: elide;
+                        spacing: 12px;
+
+                        Text {
+                            horizontal-stretch: 1;
+                            text: item.name;
+                            color: #f8f8f2;
+                            font-size: 14.5px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+
+                        if item.subtitle != "" : subtitle_box := Rectangle {
+                            width: min(210px, sub1.preferred-width);
+                            height: parent.height;
+                            clip: true;
+
+                            // Loop distance = one text width + the trailing gap.
+                            property <length> loop_dist: sub1.preferred-width + 32px;
+                            // Only run the ribbon when the text is too wide to fit.
+                            property <bool> is_overflow: sub1.preferred-width > self.width;
+                            // Active only while this row is selected AND overflowing.
+                            property <bool> active: root.selected_index == index && self.is_overflow;
+
+                            // Leading text: scrolls left by `loop_dist`, looping forever.
+                            sub1 := Text {
+                                text: item.subtitle;
+                                color: #6272a4;
+                                font-size: 12px;
+                                height: 100%;
+                                vertical-alignment: center;
+
+                                x: subtitle_box.active ? -subtitle_box.loop_dist : 0px;
+
+                                animate x {
+                                    duration: subtitle_box.active ? 5s : 0ms;
+                                    iteration-count: -1;
+                                    easing: linear;
+                                }
+                            }
+
+                            // Trailing duplicate: sits exactly `loop_dist` behind the
+                            // lead, so as the lead exits left the copy slides in from the
+                            // right -- a seamless, gap-then-loop marquee with no jump.
+                            if subtitle_box.is_overflow : Text {
+                                text: item.subtitle;
+                                color: #6272a4;
+                                font-size: 12px;
+                                height: 100%;
+                                vertical-alignment: center;
+
+                                x: sub1.x + subtitle_box.loop_dist;
+                            }
+                        }
                     }
 
                     TouchArea {

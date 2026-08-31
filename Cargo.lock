@@ -5099,6 +5099,7 @@ name = "stools"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "dirs",
  "global-hotkey",
  "muda",
  "nucleo-matcher",
@@ -5106,6 +5107,7 @@ dependencies = [
  "pinyin",
  "raw-window-handle",
  "serde",
+ "serde_json",
  "slint",
  "slint-build",
  "tray-icon",
