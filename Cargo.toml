@@ -2,5 +2,30 @@
 name = "stools"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal Fuzzel-style application launcher built with Slint"
 
 [dependencies]
+slint = { version = "1.11", features = ["raw-window-handle-06"] }
+nucleo-matcher = "0.3"
+pinyin = { version = "0.10", features = ["plain", "heteronym"] }
+serde = { version = "1.0", features = ["derive"] }
+bincode = "2.0"
+
+# Linux-only dependencies
+[target.'cfg(target_os = "linux")'.dependencies]
+
+# Windows-only dependencies
+[target.'cfg(windows)'.dependencies]
+global-hotkey = "0.8"
+tray-icon = "0.24"
+muda = "0.19"
+open = "5"
+raw-window-handle = "0.6"
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
+[build-dependencies]
+slint-build = "1.11"
+
+[profile.release]
+lto = true
+strip = true

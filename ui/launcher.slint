@@ -1,0 +1,159 @@
+import { ListView } from "std-widgets.slint";
+
+export struct AppItem {
+    id: string,
+    name: string,
+    exec: string,
+    icon: image,
+}
+
+export component LauncherWindow inherits Window {
+    // Fixed size, borderless, always on top. The window chrome is invisible so the
+    // `main_container` rectangle below is the only thing rendered.
+    width: 560px;
+    height: 500px;
+    no-frame: true;
+    always-on-top: true;
+    background: transparent;
+    default-font-family: "JetBrains Mono";
+
+    // --- Public data model and callbacks ------------------------------------
+    in-out property <[AppItem]> items: [];
+    in-out property <int> selected_index: 0;
+    callback search_changed(string);
+    callback item_executed(int);
+    callback escape_pressed();
+
+    // The text currently typed in the search box. Exposed so the host can read it
+    // (e.g. to restore it on Windows before showing the window).
+    in-out property <string> query: "";
+
+    // Called by the host right before showing the window (mainly Windows): focuses
+    // the input and selects all its text so typing replaces the previous query.
+    public function prepare_show() {
+        input.select-all();
+        input.focus();
+    }
+
+    forward-focus: input;
+
+    // --- Main panel ----------------------------------------------------------
+    main_container := Rectangle {
+        background: #1e1e2eE6; // dark, mostly opaque (alpha ~0.9)
+        border-radius: 12px;
+        border-width: 1px;
+        border-color: #89b4fa66;
+        clip: true;
+
+        VerticalLayout {
+            padding: 14px;
+            spacing: 10px;
+
+            // Input row: ">" prompt + search box
+            HorizontalLayout {
+                spacing: 8px;
+                height: 38px;
+
+                Text {
+                    text: ">";
+                    color: #89b4fa;
+                    font-size: 20px;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    height: 38px;
+                    horizontal-stretch: 1;
+                    background: transparent;
+
+                    // Placeholder drawn behind the (transparent) input.
+                    placeholder := Text {
+                        x: 2px;
+                        text: root.query == "" ? "Search applications..." : "";
+                        color: #6c7086;
+                        font-size: 16px;
+                        vertical-alignment: center;
+                    }
+
+                    input := TextInput {
+                        width: parent.width;
+                        height: parent.height;
+                        font-size: 16px;
+                        color: #cdd6f4;
+                        selection-background-color: #89b4fa;
+                        selection-foreground-color: #1e1e2e;
+                        single-line: true;
+
+                        edited => {
+                            root.query = self.text;
+                            root.search_changed(self.text);
+                            root.selected_index = 0;
+                        }
+
+                        key-pressed(event) => {
+                            if event.text == Key.Escape {
+                                root.escape_pressed();
+                                return accept;
+                            }
+                            if event.text == Key.DownArrow {
+                                root.selected_index = Math.min(root.selected_index + 1, root.items.length - 1);
+                                return accept;
+                            }
+                            if event.text == Key.UpArrow {
+                                root.selected_index = Math.max(root.selected_index - 1, 0);
+                                return accept;
+                            }
+                            if event.text == Key.Return {
+                                if root.items.length > 0 {
+                                    root.item_executed(root.selected_index);
+                                }
+                                return accept;
+                            }
+                            return reject;
+                        }
+                    }
+                }
+            }
+
+            // Result list
+            list := ListView {
+                preferred-height: 420px;
+
+                for item[index] in root.items : Rectangle {
+                    height: 40px;
+                    border-radius: 6px;
+                    background: root.selected_index == index ? #45475aCC : transparent;
+
+                    HorizontalLayout {
+                        padding-left: 8px;
+                        padding-right: 8px;
+                        spacing: 12px;
+
+                        Image {
+                            source: item.icon;
+                            width: 22px;
+                            height: 22px;
+                            vertical-alignment: center;
+                        }
+
+                        Text {
+                            text: item.name;
+                            color: root.selected_index == index ? #f5e0dc : #bac2de;
+                            font-size: 15px;
+                            vertical-alignment: center;
+                            overflow: elide;
+                        }
+                    }
+
+                    TouchArea {
+                        clicked => {
+                            root.selected_index = index;
+                            root.item_executed(index);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
