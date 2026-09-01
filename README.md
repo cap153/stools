@@ -79,7 +79,8 @@ cache; subsequent runs load the cache instantly and refresh it in the background
 By default the launcher scans a built-in list of common locations (`~/.local/bin`,
 `~/.cargo/bin`, `~/.deno/bin`, `~/.bun/bin`, `~/.zvm/bin`, `/usr/local/bin`,
 `/usr/bin`, `/home/linuxbrew/.linuxbrew/bin`, `/opt/rocm/bin`, …). To scan extra
-directories, pass them as arguments — `~` is expanded:
+directories, add them to `path` in `config.toml`, or pass them as arguments —
+`~` and `$VAR` are expanded either way:
 
 ```sh
 stools "$HOME/.zvm/bin" "/home/linuxbrew/.linuxbrew/bin"
@@ -93,7 +94,8 @@ subtitle. Paths are prettified for display (`/home/you/...` → `~`, `/opt/rocm`
 
 The launcher runs in the background after start:
 
-- **`Alt+Space`** (or left-click the tray icon) summons and focuses the window.
+- **`Alt+A`** (or left-click the tray icon) summons and focuses the window — the
+  hotkey is whatever `[keybindings]` maps to the `stools` action.
 - **`Esc`** hides it.
 - The tray menu has **Show** and **Quit**.
 - Selecting an app launches it and hides the launcher.
@@ -105,12 +107,88 @@ The launcher runs in the background after start:
 - Start-menu `.lnk` files are scanned for app names; launching goes through the
   shell (`ShellExecute`) so `.exe`/`.lnk`/URL targets all work. Icon extraction
   from `.lnk` is not implemented yet (entries render text-only).
+- The directories in `config.toml`'s `path` are scanned for executables the same
+  way they are on Linux, and rank below Start Menu entries.
 
 ## Configuration
 
-There are no config files yet. The window size / colours live in
-[`ui/launcher.slint`](ui/launcher.slint), and the Windows hotkey is defined in
-[`src/platform/windows.rs`](src/platform/windows.rs) (`Alt+Space`).
+Everything (search paths, keybindings, theme) is configured in a single
+`config.toml`, which is created on first run with a fully commented English
+default file:
+
+| Platform | Path                                                                    |
+|----------|-------------------------------------------------------------------------|
+| Linux    | `$XDG_CONFIG_HOME/stools/config.toml` (→ `~/.config/stools/config.toml`) |
+| Windows  | `%APPDATA%\stools\config.toml`                                           |
+
+Every entry is optional — deleting the file (or a single key) restores the
+built-in Dracula defaults. A parse error is reported on `stderr` and the defaults
+are used instead, so a broken config never prevents the launcher from starting.
+
+```toml
+path = ["$HOME/.cargo/bin", "~/.deno/bin"]   # extra scan dirs (~, $VAR, %VAR% expanded)
+
+[keybindings]                 # no modifier
+tab = "down"
+esc = "close"                 # Linux: quit / Windows: hide
+Return = "execute"
+Up = "up"
+Down = "down"
+
+[keybindings.shift]
+tab = "up"
+
+[keybindings.alt]
+a = "stools"                  # summon the window (Windows global hotkey)
+
+[theme]                       # Fuzzel RRGGBBAA colours
+background = "282a36dd"
+text = "f8f8f2ff"
+match = "8be9fdff"
+selection-match = "8be9fdff"
+selection = "44475add"
+selection-text = "f8f8f2ff"
+border = "bd93f9ff"
+font = ["ComicShannsMono Nerd Font", "LXGW WenKai GB Screen"]
+```
+
+### Search paths
+
+`path` entries are appended to the built-in binary directories and, on Linux, are
+also scanned for `.desktop` files (Windows scans them for `.exe`/`.bat`/`.cmd`/
+`.ps1`/`.lnk`). `~`, `$VAR`, `${VAR}` and `%VAR%` are expanded, missing
+directories are ignored. Directories passed on the command line still work and
+are added on top of the configured ones.
+
+The Linux scan cache records which directories it was built from, so editing
+`path` invalidates it and the next launch rescans instead of serving stale
+results.
+
+### Keybindings
+
+Actions: `down`, `up`, `execute`, `close` (Linux: quit / Windows: hide) and
+`stools` (summon; registered as a global hotkey on Windows).
+
+The table name is the modifier combination — `[keybindings]` or
+`[keybindings.none]` for no modifier, otherwise any combination of `ctrl`,
+`alt`, `shift`, `super` (`win`/`meta`/`cmd`) in any order, joined by `_` or `+`
+(quote the name when using `+`, e.g. `[keybindings."super+shift"]`).
+
+Key names are case-insensitive and accept both the XKB spelling reported by
+`wev` (`Escape`, `Return`, `Prior`, `Next`, `space`, …) and the usual aliases
+(`esc`, `enter`, `pageup`, `pagedown`, …); single characters are literal keys.
+On Windows, the binding mapped to `stools` becomes the global hotkey (default
+**Alt+A**).
+
+### Theme
+
+Colours use Fuzzel's `RRGGBBAA` notation (a leading `#` and the `RGB`/`RGBA`/
+`RRGGBB` forms are also accepted), so existing Fuzzel themes can be pasted in
+as-is; invalid values keep the built-in colour.
+
+`font` is a priority list: the first family installed on the system wins (checked
+against the system font database), and glyphs missing from it — CJK in a Latin
+mono font, say — are resolved through the system font fallback.
 
 ## Project layout
 
@@ -121,6 +199,9 @@ src/
   main.rs           # platform entry dispatch
   launcher.rs       # shared Slint model helpers
   core/
+    config.rs       # config.toml location, template + path expansion
+    keybind.rs      # modifier/key normalization + action dispatch
+    theme.rs        # Fuzzel colour parsing + font family resolution
     matcher.rs      # nucleo + pinyin fuzzy matching (with MRU boost)
     model.rs        # AppEntry data model
     indexer.rs      # on-disk cache
@@ -158,4 +239,6 @@ Field meanings:
 cargo test
 ```
 
-Covers pinyin field generation (incl. heteronyms) and fuzzy ranking.
+Covers pinyin field generation (incl. heteronyms), fuzzy ranking, config
+parsing / path expansion, keybinding normalization and dispatch, and colour
+parsing.

@@ -14,10 +14,12 @@ const KNOWN_PREFIXES: &[(&str, &str)] = &[
 pub fn prettify_path(path: &Path) -> String {
     let s = path.to_string_lossy();
 
-    // 1. Try $HOME → ~
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() && s.starts_with(&home) {
-            return format!("~{}", &s[home.len()..]);
+    // 1. Try the home directory → ~ ($HOME on Linux, %USERPROFILE% on Windows)
+    for var in ["HOME", "USERPROFILE"] {
+        if let Ok(home) = std::env::var(var) {
+            if !home.is_empty() && s.starts_with(&home) {
+                return format!("~{}", &s[home.len()..]);
+            }
         }
     }
 
@@ -35,7 +37,9 @@ pub fn prettify_path(path: &Path) -> String {
 
 /// Default directories to scan for executables when no CLI args are given.
 /// These cover the most common locations across Arch / Fedora / Ubuntu / NixOS
-/// user setups. The user can always override or extend via CLI arguments.
+/// user setups. The user can always override or extend via the config file or
+/// CLI arguments.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn default_binary_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     let home = std::env::var("HOME").unwrap_or_default();
@@ -54,13 +58,7 @@ pub fn default_binary_dirs() -> Vec<PathBuf> {
         }
     }
 
-    for system in [
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-    ] {
+    for system in ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
         dirs.push(PathBuf::from(system));
     }
 
@@ -72,24 +70,23 @@ pub fn default_binary_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// Merge CLI arguments (custom directories) with the default set, deduplicating.
-pub fn merge_binary_dirs(cli_args: &[String]) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = cli_args
-        .iter()
-        .map(|s| {
-            let expanded = if let Some(rest) = s.strip_prefix('~') {
-                if let Some(home) = dirs::home_dir() {
-                    home.join(rest.trim_start_matches('/'))
-                } else {
-                    PathBuf::from(s)
-                }
-            } else {
-                PathBuf::from(s)
-            };
-            expanded
-        })
+/// Expand the given directory strings (`~`, `$VAR`, `${VAR}`, `%VAR%`), keeping
+/// only the ones that exist and dropping duplicates. Used for both the config
+/// file's `path` list and the command line arguments.
+pub fn resolve_dirs(raw: &[String]) -> Vec<PathBuf> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    raw.iter()
+        .filter_map(|s| crate::core::config::expand_path(s))
         .filter(|p| p.is_dir())
-        .collect();
+        .filter(|p| seen.insert(p.clone()))
+        .collect()
+}
+
+/// Merge extra directories (config file `path` + CLI arguments) with the default
+/// set, deduplicating.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub fn merge_binary_dirs(extra: &[String]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = resolve_dirs(extra);
 
     let mut seen: std::collections::HashSet<PathBuf> = dirs.iter().cloned().collect();
     for d in default_binary_dirs() {

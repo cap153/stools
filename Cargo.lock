@@ -5100,6 +5100,7 @@ version = "0.1.0"
 dependencies = [
  "bincode",
  "dirs",
+ "fontique",
  "global-hotkey",
  "muda",
  "nucleo-matcher",
@@ -5110,6 +5111,7 @@ dependencies = [
  "serde_json",
  "slint",
  "slint-build",
+ "toml 0.8.2",
  "tray-icon",
  "windows-sys 0.59.0",
 ]

@@ -1,8 +1,9 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -10,10 +11,13 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
-use crate::core::matcher::{pinyin_fields, rank};
+use crate::core::config::Config;
 use crate::core::history::HistoryManager;
+use crate::core::keybind::{KeybindingMap, hotkey_code_name};
+use crate::core::matcher::{pinyin_fields, rank};
 use crate::core::model::{AppEntry, EntryKind};
-use crate::launcher::{build_model, LauncherWindow};
+use crate::core::theme;
+use crate::launcher::{LauncherWindow, build_model};
 
 use slint::{ComponentHandle, Model};
 
@@ -30,7 +34,9 @@ fn start_menu_dirs() -> Vec<PathBuf> {
 }
 
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in rd.flatten() {
         let path = entry.path();
         let ft = entry.file_type();
@@ -42,8 +48,62 @@ fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Scan Start Menu `.lnk` files to build the app list.
-pub fn scan_apps() -> Vec<AppEntry> {
+/// Extensions treated as launchable when scanning the config file's `path` list.
+const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "lnk", "msc"];
+
+fn is_executable(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+        .is_some_and(|e| EXECUTABLE_EXTENSIONS.contains(&e.as_str()))
+}
+
+/// Scan the extra directories from the config file (non-recursive) for
+/// executables, mirroring the Linux binary scan.
+fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
+    let mut entries = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for dir in dirs {
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+        files.sort();
+        for path in files {
+            if !path.is_file() || !is_executable(&path) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if stem.is_empty() || stem.starts_with('.') {
+                continue;
+            }
+            if !seen.insert(path.to_string_lossy().to_lowercase()) {
+                continue;
+            }
+            let (pinyin_full, pinyin_abbr) = pinyin_fields(stem);
+            entries.push(AppEntry {
+                id: format!("bin:{}", path.to_string_lossy()),
+                name: stem.to_string(),
+                exec: path.to_string_lossy().into_owned(),
+                icon_path: None,
+                hidden: false,
+                pinyin_full,
+                pinyin_abbr,
+                kind: EntryKind::Binary,
+                subtitle: None,
+            });
+        }
+    }
+
+    entries
+}
+
+/// Scan Start Menu `.lnk` files (plus the config file's extra directories) to
+/// build the app list.
+pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
     let mut files = Vec::new();
     for dir in start_menu_dirs() {
         walk_dir(&dir, &mut files);
@@ -77,6 +137,25 @@ pub fn scan_apps() -> Vec<AppEntry> {
             subtitle: None,
         });
     }
+
+    // Binaries rank below Start Menu shortcuts, exactly like on Linux.
+    entries.extend(scan_binaries(extra_dirs));
+
+    // Show the origin path only for names that appear more than once.
+    let mut name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for e in &entries {
+        *name_counts.entry(e.name.to_lowercase()).or_insert(0) += 1;
+    }
+    for e in &mut entries {
+        e.subtitle = (name_counts
+            .get(&e.name.to_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1)
+        .then(|| crate::core::path_utils::prettify_path(Path::new(&e.exec)));
+    }
+
     entries
 }
 
@@ -90,7 +169,7 @@ fn show_and_focus(ui: &LauncherWindow) {
             if let RawWindowHandle::Win32(w) = wh.as_raw() {
                 unsafe {
                     windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(
-                        w.hwnd.get() as *mut core::ffi::c_void,
+                        w.hwnd.get() as *mut core::ffi::c_void
                     );
                 }
             }
@@ -105,13 +184,47 @@ fn hide_window(ui: &LauncherWindow) {
     let _ = ui.hide();
 }
 
+/// Translate a configured binding into a `global-hotkey` shortcut.
+fn build_hotkey(mask: crate::core::keybind::ModifiersMask, key: &str) -> Option<HotKey> {
+    let code = Code::from_str(&hotkey_code_name(key)?).ok()?;
+    let mut mods = Modifiers::empty();
+    if mask.ctrl {
+        mods |= Modifiers::CONTROL;
+    }
+    if mask.alt {
+        mods |= Modifiers::ALT;
+    }
+    if mask.shift {
+        mods |= Modifiers::SHIFT;
+    }
+    if mask.meta {
+        mods |= Modifiers::SUPER;
+    }
+    Some(HotKey::new((!mods.is_empty()).then_some(mods), code))
+}
+
 /// The Windows daemon: lives in the tray, registers a global hotkey and toggles
 /// the launcher window between hidden and shown.
 pub fn run() {
-    let apps = scan_apps();
+    let config = Config::load_or_create();
+    let mut extra_dirs = config.path.clone();
+    extra_dirs.extend(std::env::args().skip(1));
+    let apps = scan_apps(&crate::core::path_utils::resolve_dirs(&extra_dirs));
 
     let ui = LauncherWindow::new().unwrap();
     let weak = ui.as_weak();
+
+    theme::apply_theme(&ui, &config.theme);
+
+    let keybindings = KeybindingMap::from_config(&config.keybindings);
+    let summon = keybindings.summon_binding();
+    ui.on_resolve_key(move |text, ctrl, alt, shift, meta| {
+        keybindings
+            .resolve_event(&text, ctrl, alt, shift, meta)
+            .map(|action| action.as_str())
+            .unwrap_or_default()
+            .into()
+    });
 
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = crate::core::matcher::MatcherScratch::default();
@@ -131,7 +244,9 @@ pub fn run() {
     {
         let history = history.clone();
         ui.on_search_changed(move |query| {
-            let Some(ui) = search_weak.upgrade() else { return };
+            let Some(ui) = search_weak.upgrade() else {
+                return;
+            };
             let idxs = rank(
                 &apps,
                 &query,
@@ -170,12 +285,16 @@ pub fn run() {
 
     ui.hide().unwrap();
 
-    // ---- Global hotkey: Alt+Space to summon ---------------------------------
+    // ---- Global hotkey: whatever the config binds to "stools" ---------------
+    // (default Alt+A; the window can still be summoned from the tray icon).
     let hotkey_manager = GlobalHotKeyManager::new().expect("failed to init hotkey manager");
-    let hotkey = HotKey::new(Some(Modifiers::ALT), Code::Space);
-    hotkey_manager
-        .register(hotkey)
-        .expect("failed to register hotkey Alt+Space");
+    if let Some(hotkey) = summon.and_then(|(mask, key)| build_hotkey(mask, &key)) {
+        if let Err(err) = hotkey_manager.register(hotkey) {
+            eprintln!("[stools] failed to register global hotkey {hotkey:?}: {err}");
+        }
+    } else {
+        eprintln!("[stools] no global hotkey bound to the \"stools\" action");
+    }
 
     GlobalHotKeyEvent::set_event_handler(Some({
         let weak = weak.clone();

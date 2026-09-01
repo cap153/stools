@@ -7,12 +7,15 @@ use std::process::Command;
 
 use nucleo_matcher::{Config as MatcherConfig, Matcher};
 
+use crate::core::config::Config;
 use crate::core::history::HistoryManager;
 use crate::core::indexer;
+use crate::core::keybind::KeybindingMap;
 use crate::core::matcher;
 use crate::core::model::{AppEntry, EntryKind};
 use crate::core::path_utils;
-use crate::launcher::{build_model, LauncherWindow};
+use crate::core::theme;
+use crate::launcher::{LauncherWindow, build_model};
 
 use slint::{ComponentHandle, Model};
 
@@ -30,10 +33,7 @@ fn desktop_dirs(custom_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let home = std::env::var("HOME").unwrap_or_default();
     if !home.is_empty() {
         dirs.push(PathBuf::from(&home).join(".local/share/applications"));
-        dirs.push(
-            PathBuf::from(&home)
-                .join(".local/share/flatpak/exports/share/applications"),
-        );
+        dirs.push(PathBuf::from(&home).join(".local/share/flatpak/exports/share/applications"));
     }
     let data_home = std::env::var("XDG_DATA_HOME").unwrap_or_default();
     if !data_home.is_empty() {
@@ -86,24 +86,20 @@ fn build_icon_map() -> HashMap<String, PathBuf> {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             let Some(name) = entry.file_name().to_str().map(String::from) else {
-                continue
+                continue;
             };
             let ft = entry.file_type();
             if ft.as_ref().map_or(true, |t| t.is_file()) {
                 // found a file — record it if it's a valid image in a "known" location
                 if is_icon_file(&name) {
-                    let subdir_name = dir
-                        .file_name()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or_default();
-                    if subdir_name == "apps" || dir.parent().is_some_and(|p| {
-                        p.file_name().is_some_and(|s| s == "pixmaps")
-                    }) {
-                        let stem = name
-                            .rsplit_once('.')
-                            .map_or(name.as_str(), |(s, _)| s);
-                        map.entry(stem.to_string())
-                            .or_insert_with(|| entry.path());
+                    let subdir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or_default();
+                    if subdir_name == "apps"
+                        || dir
+                            .parent()
+                            .is_some_and(|p| p.file_name().is_some_and(|s| s == "pixmaps"))
+                    {
+                        let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+                        map.entry(stem.to_string()).or_insert_with(|| entry.path());
                     }
                 }
                 continue;
@@ -123,14 +119,11 @@ fn build_icon_map() -> HashMap<String, PathBuf> {
         let Ok(rd) = fs::read_dir(&dir) else { continue };
         for entry in rd.flatten() {
             let Some(name) = entry.file_name().to_str().map(String::from) else {
-                continue
+                continue;
             };
-            if entry.file_type().as_ref().map_or(false, |t| t.is_file())
-                && is_icon_file(&name)
-            {
+            if entry.file_type().as_ref().map_or(false, |t| t.is_file()) && is_icon_file(&name) {
                 let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
-                map.entry(stem.to_string())
-                    .or_insert_with(|| entry.path());
+                map.entry(stem.to_string()).or_insert_with(|| entry.path());
             }
         }
     }
@@ -188,11 +181,7 @@ fn parse_bool(v: Option<&str>, def: bool) -> bool {
     }
 }
 
-fn parse_desktop(
-    path: &Path,
-    _id: &str,
-    icon_map: &HashMap<String, PathBuf>,
-) -> Option<AppEntry> {
+fn parse_desktop(path: &Path, _id: &str, icon_map: &HashMap<String, PathBuf>) -> Option<AppEntry> {
     let content = fs::read_to_string(path).ok()?;
     let mut name = None::<String>;
     let mut exec = None::<String>;
@@ -284,7 +273,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 continue;
             }
             let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-                continue
+                continue;
             };
             // Skip hidden files and common non-launchable helpers
             if name.starts_with('.') {
@@ -369,7 +358,12 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
         *name_counts.entry(e.name.to_lowercase()).or_insert(0) += 1;
     }
     for e in &mut entries {
-        if name_counts.get(&e.name.to_lowercase()).copied().unwrap_or(0) > 1 {
+        if name_counts
+            .get(&e.name.to_lowercase())
+            .copied()
+            .unwrap_or(0)
+            > 1
+        {
             let origin = match e.kind {
                 // Binaries: the executable path itself.
                 EntryKind::Binary => Path::new(&e.exec),
@@ -389,32 +383,39 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
 // Cache with true background refresh
 // ---------------------------------------------------------------------------
 
-/// `custom_dirs` are the directories passed on the command line (both `.desktop`
-/// files and executables are picked up there); `binary_dirs` are the merged
-/// executable-search paths. When the user passed custom dirs we scan
-/// synchronously so a just-added `.desktop` shows up immediately instead of
-/// serving a stale cache.
-pub fn load_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> {
-    if !custom_dirs.is_empty() {
+/// `custom_dirs` are the extra directories from the config file plus the command
+/// line (both `.desktop` files and executables are picked up there);
+/// `binary_dirs` are the merged executable-search paths. `force_fresh` (set when
+/// directories were passed on the command line) scans synchronously so a
+/// just-added `.desktop` shows up immediately instead of serving a stale cache.
+pub fn load_apps(
+    custom_dirs: &[PathBuf],
+    binary_dirs: &[PathBuf],
+    force_fresh: bool,
+) -> Vec<AppEntry> {
+    let fingerprint = indexer::dirs_fingerprint(&[custom_dirs, binary_dirs]);
+
+    if force_fresh {
         let apps = scan_apps(custom_dirs, binary_dirs);
-        indexer::save_cache(&apps);
+        indexer::save_cache(&apps, fingerprint);
         return apps;
     }
 
-    let dirs = binary_dirs.to_vec();
-    if let Some(cached) = indexer::load_cache() {
+    if let Some(cached) = indexer::load_cache(fingerprint) {
         // Real background refresh — doesn't block the main thread.
+        let custom = custom_dirs.to_vec();
+        let dirs = binary_dirs.to_vec();
         std::thread::spawn(move || {
-            let fresh = scan_apps(&[], &dirs);
+            let fresh = scan_apps(&custom, &dirs);
             if !fresh.is_empty() {
-                indexer::save_cache(&fresh);
+                indexer::save_cache(&fresh, fingerprint);
             }
         });
         return cached;
     }
-    // Cold start: scan synchronously (only happens once).
-    let apps = scan_apps(&[], binary_dirs);
-    indexer::save_cache(&apps);
+    // Cold start (or the scanned directories changed): scan synchronously.
+    let apps = scan_apps(custom_dirs, binary_dirs);
+    indexer::save_cache(&apps, fingerprint);
     apps
 }
 
@@ -440,28 +441,34 @@ fn launch_exec(exec: &str) {
 
 pub fn run() {
     let t0 = std::time::Instant::now();
+    let config = Config::load_or_create();
     let cli_dirs: Vec<String> = env::args().skip(1).collect();
-    let binary_dirs = path_utils::merge_binary_dirs(&cli_dirs);
-    // Custom dirs are the user's explicit CLI args (with `~` expanded); they are
-    // scanned for BOTH .desktop files and executables.
-    let custom_dirs: Vec<PathBuf> = cli_dirs
-        .iter()
-        .filter_map(|s| {
-            let expanded = if let Some(rest) = s.strip_prefix('~') {
-                dirs::home_dir().map(|h| h.join(rest.trim_start_matches('/')))
-            } else {
-                Some(PathBuf::from(s))
-            }?;
-            expanded.is_dir().then_some(expanded)
-        })
-        .collect();
-    let apps = load_apps(&custom_dirs, &binary_dirs);
+
+    // Config file paths come first, CLI arguments extend them.
+    let mut extra_dirs = config.path.clone();
+    extra_dirs.extend(cli_dirs.iter().cloned());
+    let binary_dirs = path_utils::merge_binary_dirs(&extra_dirs);
+    // Custom dirs are the user's explicit directories (config + CLI, expanded);
+    // they are scanned for BOTH .desktop files and executables.
+    let custom_dirs: Vec<PathBuf> = path_utils::resolve_dirs(&extra_dirs);
+    let apps = load_apps(&custom_dirs, &binary_dirs, !cli_dirs.is_empty());
     let app_count = apps.len();
     let t_load = t0.elapsed();
 
     let ui = LauncherWindow::new().unwrap();
     let t_new = t0.elapsed();
     let weak = ui.as_weak();
+
+    theme::apply_theme(&ui, &config.theme);
+
+    let keybindings = KeybindingMap::from_config(&config.keybindings);
+    ui.on_resolve_key(move |text, ctrl, alt, shift, meta| {
+        keybindings
+            .resolve_event(&text, ctrl, alt, shift, meta)
+            .map(|action| action.as_str())
+            .unwrap_or_default()
+            .into()
+    });
 
     let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
     let mut scratch = matcher::MatcherScratch::default();
@@ -484,7 +491,9 @@ pub fn run() {
     {
         let history = history.clone();
         ui.on_search_changed(move |query| {
-            let Some(ui) = search_weak.upgrade() else { return };
+            let Some(ui) = search_weak.upgrade() else {
+                return;
+            };
             let st = std::time::Instant::now();
             let idxs = matcher::rank(
                 &apps,
@@ -496,14 +505,20 @@ pub fn run() {
             ui.set_items(build_model(&apps, &idxs, &image_cache));
             ui.set_selected_index(0);
             if std::env::var("STOOLS_DEBUG").is_ok() {
-                eprintln!("[stools] search-rebuild={:?} n={}", st.elapsed(), ui.get_items().row_count());
+                eprintln!(
+                    "[stools] search-rebuild={:?} n={}",
+                    st.elapsed(),
+                    ui.get_items().row_count()
+                );
             }
         });
     }
 
     let exec_weak = weak.clone();
     ui.on_item_executed(move |index| {
-        let Some(ui) = exec_weak.upgrade() else { return };
+        let Some(ui) = exec_weak.upgrade() else {
+            return;
+        };
         if let Some(item) = ui.get_items().row_data(index as usize) {
             history.borrow_mut().record_hit(&item.id.to_string());
             launch_exec(&item.exec.to_string());
@@ -520,11 +535,7 @@ pub fn run() {
     if std::env::var("STOOLS_DEBUG").is_ok() {
         eprintln!(
             "[stools] load={:?} new={:?} model={:?} show={:?} apps={}",
-            t_load,
-            t_new,
-            t_model,
-            t_show,
-            app_count
+            t_load, t_new, t_model, t_show, app_count
         );
     }
     slint::run_event_loop_until_quit().unwrap();

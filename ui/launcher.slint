@@ -12,7 +12,16 @@ export component LauncherWindow inherits Window {
     no-frame: true;
     always-on-top: true;
     background: transparent;
-    default-font-family: "JetBrains Mono";
+    default-font-family: root.theme_font;
+
+    // --- Theme, injected from the config file (defaults: Dracula) ---
+    in-out property <color> theme_bg: #282a36dd;
+    in-out property <color> theme_text: #f8f8f2ff;
+    in-out property <color> theme_match: #8be9fdff;
+    in-out property <color> theme_selection_bg: #44475add;
+    in-out property <color> theme_selection_text: #f8f8f2ff;
+    in-out property <color> theme_border: #bd93f9ff;
+    in-out property <string> theme_font: "JetBrains Mono";
 
     in-out property <[AppItem]> items: [];
     in-out property <int> selected_index: 0;
@@ -21,6 +30,9 @@ export component LauncherWindow inherits Window {
     callback search_changed(string);
     callback item_executed(int);
     callback escape_pressed();
+    /// Ask the Rust side what a key event means; returns the action name
+    /// ("up", "down", "close", "execute", "stools") or "" when unbound.
+    callback resolve_key(text: string, ctrl: bool, alt: bool, shift: bool, meta: bool) -> string;
 
     private property <length> item_height: 34px;
     private property <length> item_spacing: 2px;
@@ -29,6 +41,20 @@ export component LauncherWindow inherits Window {
 
     // Marquee tuneables. marquee_gap is the empty space left behind the leading
     // text before the trailing duplicate begins (seamless ribbon loop).
+
+    public function select_next() {
+        if (root.items.length > 0) {
+            root.selected_index = Math.min(root.selected_index + 1, root.items.length - 1);
+            root.ensure_visible(root.selected_index);
+        }
+    }
+
+    public function select_prev() {
+        if (root.items.length > 0) {
+            root.selected_index = Math.max(root.selected_index - 1, 0);
+            root.ensure_visible(root.selected_index);
+        }
+    }
 
     function ensure_visible(idx: int) {
         let item_top = idx * root.row_total_height;
@@ -53,10 +79,10 @@ export component LauncherWindow inherits Window {
     main_container := Rectangle {
         width: 100%;
         height: 100%;
-        background: #282a36dd;
+        background: root.theme_bg;
         border-radius: 12px;
         border-width: 1.5px;
-        border-color: #bd93f9;
+        border-color: root.theme_border;
         clip: true;
 
         VerticalLayout {
@@ -69,7 +95,7 @@ export component LauncherWindow inherits Window {
 
                 Text {
                     text: ">";
-                    color: #586E75;
+                    color: root.theme_match;
                     font-size: 18px;
                     font-weight: 700;
                     vertical-alignment: center;
@@ -78,9 +104,9 @@ export component LauncherWindow inherits Window {
                 input := TextInput {
                     horizontal-stretch: 1;
                     font-size: 15px;
-                    color: #f8f8f2;
-                    selection-background-color: #bd93f9;
-                    selection-foreground-color: #282a36;
+                    color: root.theme_text;
+                    selection-background-color: root.theme_border;
+                    selection-foreground-color: root.theme_bg;
                     single-line: true;
                     vertical-alignment: center;
 
@@ -91,27 +117,30 @@ export component LauncherWindow inherits Window {
                         flick.viewport-y = 0px;
                     }
 
+                    // Every shortcut is resolved by the config-driven keybinding
+                    // table on the Rust side; the UI only performs the action.
                     key-pressed(event) => {
-                        if event.text == Key.Escape {
+                        let action = root.resolve_key(
+                            event.text,
+                            event.modifiers.control,
+                            event.modifiers.alt,
+                            event.modifiers.shift,
+                            event.modifiers.meta,
+                        );
+                        if (action == "down") {
+                            root.select_next();
+                            return accept;
+                        }
+                        if (action == "up") {
+                            root.select_prev();
+                            return accept;
+                        }
+                        if (action == "close") {
                             root.escape_pressed();
                             return accept;
                         }
-                        if event.text == Key.DownArrow {
-                            if root.items.length > 0 {
-                                root.selected_index = Math.min(root.selected_index + 1, root.items.length - 1);
-                                root.ensure_visible(root.selected_index);
-                            }
-                            return accept;
-                        }
-                        if event.text == Key.UpArrow {
-                            if root.items.length > 0 {
-                                root.selected_index = Math.max(root.selected_index - 1, 0);
-                                root.ensure_visible(root.selected_index);
-                            }
-                            return accept;
-                        }
-                        if event.text == Key.Return {
-                            if root.items.length > 0 {
+                        if (action == "execute") {
+                            if (root.items.length > 0) {
                                 root.item_executed(root.selected_index);
                             }
                             return accept;
@@ -130,7 +159,7 @@ export component LauncherWindow inherits Window {
                     width: flick.width;
                     height: root.item_height;
                     border-radius: 0px;
-                    background: root.selected_index == index ? #44475add : transparent;
+                    background: root.selected_index == index ? root.theme_selection_bg : transparent;
 
                     Rectangle {
                         x: 6px;
@@ -158,7 +187,7 @@ export component LauncherWindow inherits Window {
                         Text {
                             horizontal-stretch: 1;
                             text: item.name;
-                            color: #f8f8f2;
+                            color: root.selected_index == index ? root.theme_selection_text : root.theme_text;
                             font-size: 14.5px;
                             vertical-alignment: center;
                             overflow: elide;
