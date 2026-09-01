@@ -2,22 +2,22 @@
 
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock};
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
-use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 use crate::core::config::Config;
 use crate::core::history::HistoryManager;
 use crate::core::keybind::{KeybindingMap, hotkey_code_name};
-use crate::core::matcher::{pinyin_fields, rank};
+use crate::core::matcher::pinyin_fields;
 use crate::core::model::{AppEntry, EntryKind};
+use crate::core::search::SearchBackend;
 use crate::core::theme;
-use crate::launcher::{LauncherWindow, build_model};
+use crate::launcher::LauncherWindow;
 
 use slint::{ComponentHandle, Model};
 
@@ -228,53 +228,32 @@ pub fn run() {
             .into()
     });
 
-    let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
-    let mut scratch = crate::core::matcher::MatcherScratch::default();
     let image_cache = crate::launcher::AppImageCache::new();
+    // Keep the (non-`Send`) icon cache on the UI thread so the search worker's
+    // result closure can read it via `clone_on_ui_thread`.
+    crate::launcher::AppImageCache::set_on_ui_thread(image_cache.clone());
     let history = std::rc::Rc::new(std::cell::RefCell::new(HistoryManager::load()));
-    let initial_idxs: Vec<usize> = rank(
-        &apps,
-        "",
-        &mut matcher,
-        &mut scratch,
-        Some(&history.borrow().records),
-    );
-    ui.set_items(build_model(
-        &apps,
-        &initial_idxs,
-        "",
-        &mut matcher,
-        &mut scratch,
-        &image_cache,
-    ));
 
-    // Live filtering while typing.
-    let search_weak = weak.clone();
-    {
-        let history = history.clone();
-        ui.on_search_changed(move |query| {
-            let Some(ui) = search_weak.upgrade() else {
-                return;
-            };
-            let query = query.to_string();
-            let idxs = rank(
-                &apps,
-                &query,
-                &mut matcher,
-                &mut scratch,
-                Some(&history.borrow().records),
-            );
-            ui.set_items(build_model(
-                &apps,
-                &idxs,
-                &query,
-                &mut matcher,
-                &mut scratch,
-                &image_cache,
-            ));
-            ui.set_selected_index(0);
-        });
-    }
+    // Ranking happens on a worker thread so the caret never waits for the list.
+    // Results are pushed back via `invoke_from_event_loop` (no main-thread polling).
+    let apps = Arc::new(apps);
+    let history_records = Arc::new(RwLock::new(history.borrow().records.clone()));
+    let search = Arc::new(SearchBackend::new(
+        apps.clone(),
+        history_records.clone(),
+        ui.as_weak(),
+        image_cache.clone(),
+    ));
+    // First list is built synchronously (invoke_from_event_loop needs a running
+    // event loop, which isn't up yet here).
+    ui.set_items(search.initial_model());
+
+    // Live filtering while typing: submitted to the worker, results are pushed
+    // back to the UI via `invoke_from_event_loop`.
+    ui.on_search_changed({
+        let search = search.clone();
+        move |query| search.query(&query.to_string())
+    });
 
     // Enter / click: launch the app and hide.
     ui.on_item_executed({
@@ -283,6 +262,9 @@ pub fn run() {
             if let Some(ui) = weak.upgrade() {
                 if let Some(item) = ui.get_items().row_data(index as usize) {
                     history.borrow_mut().record_hit(&item.id.to_string());
+                    if let Ok(mut records) = history_records.write() {
+                        *records = history.borrow().records.clone();
+                    }
                     let _ = open::that_detached(item.exec.to_string());
                 }
                 hide_window(&ui);

@@ -82,6 +82,12 @@ export component LauncherWindow inherits Window {
         flick.viewport-y = 0px;
     }
 
+    /// Called when a new result set arrives (from the background search), which
+    /// resets the selection — the list has to scroll back to the top with it.
+    public function scroll_to_top() {
+        flick.viewport-y = 0px;
+    }
+
     forward-focus: input;
 
     main_container := Rectangle {

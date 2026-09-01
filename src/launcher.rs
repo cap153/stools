@@ -2,24 +2,59 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use nucleo_matcher::Matcher;
 use slint::{Image, ModelRc, SharedString, VecModel};
 
-use crate::core::matcher::{self, MatcherScratch};
+use crate::core::matcher;
 use crate::core::model::AppEntry;
 
 slint::include_modules!();
 
 /// Only this many items get their model entries built (and, transitively, their
-/// icons loaded). The Slint window only shows ~10 rows, so 30 gives some scroll
-/// headroom while keeping both startup and per-keystroke rebuilds cheap.
-const MAX_VISIBLE_ITEMS: usize = 30;
+/// icons loaded). The window shows ~14 rows, so 16 fills the screen with a little
+/// scroll headroom while keeping both startup and per-keystroke rebuilds cheap.
+const MAX_VISIBLE_ITEMS: usize = 16;
 
 /// Decoded icons live here for the whole session. Slint `Image` is a cheap
 /// clone over already-decoded data, so rebuilding the model on every keystroke
 /// reuses these instead of re-reading + re-decoding files from disk.
+///
+/// `Image` is **not** `Send`, so the cache must stay on the UI thread. The
+/// background search (`core::search`) computes results on a worker thread and
+/// pushes them back with `invoke_from_event_loop`; the closure runs on the UI
+/// thread and reads this cache from a `thread_local` rather than capturing it
+/// (which would require it to be `Send`).
 pub struct AppImageCache {
     map: RefCell<HashMap<PathBuf, Image>>,
+}
+
+thread_local! {
+    static THREAD_CACHE: RefCell<Option<AppImageCache>> = const { RefCell::new(None) };
+}
+
+impl AppImageCache {
+    /// Stash the cache on the UI thread so the search worker's result closure
+    /// (which runs there) can load icons without moving a non-`Send` value.
+    pub fn set_on_ui_thread(cache: AppImageCache) {
+        THREAD_CACHE.with(|c| *c.borrow_mut() = Some(cache));
+    }
+
+    /// Clone the UI-thread cache (shares decoded icons) for use inside a result
+    /// closure. Must be called from the UI thread.
+    pub fn clone_on_ui_thread() -> AppImageCache {
+        THREAD_CACHE
+            .with(|c| c.borrow().clone())
+            .expect("AppImageCache was not set on the UI thread")
+    }
+}
+
+impl Clone for AppImageCache {
+    /// `Image` is a cheap handle over already-decoded data, so cloning the cache
+    /// shares the decoded icons instead of re-reading them.
+    fn clone(&self) -> Self {
+        Self {
+            map: RefCell::new(self.map.borrow().clone()),
+        }
+    }
 }
 
 impl Default for AppImageCache {
@@ -73,18 +108,15 @@ pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache
     }
 }
 
-/// Build a Slint model from a set of ranked indexes. Hidden entries are
-/// filtered out first, then capped to the visible window, so a "no matches"
-/// search yields an empty model (rather than falling back to the full list).
-///
-/// `query` is re-matched per visible row only (≤ 30) to compute the highlighted
-/// characters, which keeps the per-keystroke cost bounded.
-pub fn build_model(
+/// Build a Slint model from ranked indexes whose highlight positions have
+/// already been computed (in parallel with typing, see `core::search`).
+/// Hidden entries are filtered out first, then capped to the visible window, so
+/// a "no matches" search yields an empty model (rather than falling back to the
+/// full list).
+pub fn build_model_from(
     apps: &[AppEntry],
     idxs: &[usize],
-    query: &str,
-    matcher: &mut Matcher,
-    scratch: &mut MatcherScratch,
+    highlights: &[Vec<usize>],
     cache: &AppImageCache,
 ) -> ModelRc<AppItem> {
     let items: Vec<AppItem> = idxs
@@ -92,10 +124,8 @@ pub fn build_model(
         .filter_map(|&i| apps.get(i))
         .filter(|a| !a.hidden)
         .take(MAX_VISIBLE_ITEMS)
-        .map(|a| {
-            let highlights = matcher::highlight_indices(a, query, matcher, scratch);
-            to_ui_item(a, &highlights, cache)
-        })
+        .enumerate()
+        .map(|(row, a)| to_ui_item(a, highlights.get(row).map_or(&[] as &[usize], |h| h), cache))
         .collect();
     ModelRc::new(VecModel::from(items))
 }

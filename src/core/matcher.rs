@@ -177,10 +177,11 @@ pub fn highlight_indices(
     }
 
     let mut indices: Vec<u32> = Vec::new();
+    let (name_buf, abbr_buf, full_buf, query_buf) = scratch.buffers_mut();
 
     // 1. The name itself (latin names, or typing the characters verbatim).
-    let name_utf = to_utf32(&entry.name, &mut scratch.name_buf);
-    let query_utf = to_utf32(query, &mut scratch.query_buf);
+    let name_utf = to_utf32(&entry.name, name_buf);
+    let query_utf = to_utf32(query, query_buf);
     if matcher
         .fuzzy_indices(name_utf, query_utf, &mut indices)
         .is_some()
@@ -190,8 +191,8 @@ pub fn highlight_indices(
 
     // 2. Pinyin initials: one abbreviation character per name character.
     if !entry.pinyin_abbr.is_empty() {
-        let abbr_utf = to_utf32(&entry.pinyin_abbr, &mut scratch.abbr_buf);
-        let query_utf = to_utf32(query, &mut scratch.query_buf);
+        let abbr_utf = to_utf32(&entry.pinyin_abbr, abbr_buf);
+        let query_utf = to_utf32(query, query_buf);
         if matcher
             .fuzzy_indices(abbr_utf, query_utf, &mut indices)
             .is_some()
@@ -216,8 +217,8 @@ pub fn highlight_indices(
     //    belongs to ("wangyi" → 网,易). Multiple syllables of the same character
     //    can match (heteronym), so dedup after mapping.
     if !entry.pinyin_full.is_empty() {
-        let full_utf = to_utf32(&entry.pinyin_full, &mut scratch.full_buf);
-        let query_utf = to_utf32(query, &mut scratch.query_buf);
+        let full_utf = to_utf32(&entry.pinyin_full, full_buf);
+        let query_utf = to_utf32(query, query_buf);
         if matcher
             .fuzzy_indices(full_utf, query_utf, &mut indices)
             .is_some()
@@ -261,16 +262,18 @@ fn to_utf32<'a>(s: &'a str, buf: &'a mut Vec<char>) -> Utf32Str<'a> {
 }
 
 /// Fuzzy-match a query against one candidate field. Returns the score or `None`.
+///
+/// `query` must already be converted: the caller hoists that conversion out of
+/// the entry loop (it was rebuilt up to 3× per entry before, which dominated the
+/// keystroke budget on large app lists).
 fn field_score(
     matcher: &mut Matcher,
     field: &str,
-    query: &str,
+    query: Utf32Str<'_>,
     field_buf: &mut Vec<char>,
-    query_buf: &mut Vec<char>,
 ) -> Option<u16> {
     let field_utf = to_utf32(field, field_buf);
-    let query_utf = to_utf32(query, query_buf);
-    matcher.fuzzy_match(field_utf, query_utf)
+    matcher.fuzzy_match(field_utf, query)
 }
 
 /// Score a single entry against the query across its name, pinyin abbreviation
@@ -278,20 +281,19 @@ fn field_score(
 fn score(
     entry: &AppEntry,
     matcher: &mut Matcher,
-    query: &str,
+    query: Utf32Str<'_>,
     name_buf: &mut Vec<char>,
     abbr_buf: &mut Vec<char>,
     full_buf: &mut Vec<char>,
-    query_buf: &mut Vec<char>,
 ) -> Option<u16> {
-    let mut best = field_score(matcher, &entry.name, query, name_buf, query_buf);
+    let mut best = field_score(matcher, &entry.name, query, name_buf);
     if !entry.pinyin_abbr.is_empty() {
-        if let Some(s) = field_score(matcher, &entry.pinyin_abbr, query, abbr_buf, query_buf) {
+        if let Some(s) = field_score(matcher, &entry.pinyin_abbr, query, abbr_buf) {
             best = Some(best.map_or(s, |b| b.max(s)));
         }
     }
     if !entry.pinyin_full.is_empty() {
-        if let Some(s) = field_score(matcher, &entry.pinyin_full, query, full_buf, query_buf) {
+        if let Some(s) = field_score(matcher, &entry.pinyin_full, query, full_buf) {
             best = Some(best.map_or(s, |b| b.max(s)));
         }
     }
@@ -350,16 +352,19 @@ pub fn rank(
         return idxs;
     }
 
+    // The query is encoded exactly once for the whole scan instead of once per
+    // field comparison (3 × items.len() times before).
+    let query_utf = to_utf32(query, &mut scratch.query_buf);
+
     let mut results: Vec<(usize, u16)> = Vec::with_capacity(items.len());
     for (i, entry) in items.iter().enumerate() {
         if let Some(mut s) = score(
             entry,
             matcher,
-            query,
+            query_utf,
             &mut scratch.name_buf,
             &mut scratch.abbr_buf,
             &mut scratch.full_buf,
-            &mut scratch.query_buf,
         ) {
             // Desktop apps get a base priority so GUI software ranks above CLI
             // tools of comparable match quality (without drowning out a strong
@@ -383,12 +388,40 @@ pub fn rank(
 }
 
 /// Scratch buffers reused across a batch of searches to avoid reallocations.
+///
+/// Each field keeps its own buffer so a haystack and a non-ASCII needle never
+/// alias, and so the query can be encoded once and shared (the resulting
+/// `Utf32Str` is `Copy` and only borrows `query_buf`, which the `*_as_utf32`
+/// helpers hand out one at a time).
 #[derive(Default)]
 pub struct MatcherScratch {
     pub name_buf: Vec<char>,
     pub abbr_buf: Vec<char>,
     pub full_buf: Vec<char>,
     pub query_buf: Vec<char>,
+}
+
+impl MatcherScratch {
+    /// Split the buffers into independent mutable borrows.
+    ///
+    /// Each `Utf32Str` only borrows the buffer it was encoded into, so — unlike
+    /// `&mut self` helper methods — this lets a hoisted query stay alive while
+    /// haystacks are encoded against the other buffers.
+    pub fn buffers_mut(
+        &mut self,
+    ) -> (
+        &mut Vec<char>,
+        &mut Vec<char>,
+        &mut Vec<char>,
+        &mut Vec<char>,
+    ) {
+        (
+            &mut self.name_buf,
+            &mut self.abbr_buf,
+            &mut self.full_buf,
+            &mut self.query_buf,
+        )
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +465,63 @@ mod tests {
         let mut scratch = MatcherScratch::default();
         let idxs = rank(&apps, query, &mut matcher, &mut scratch, None);
         idxs.into_iter().map(|i| apps[i].name.clone()).collect()
+    }
+
+    /// Timing harness (not an assertion): `cargo test --release keystroke -- --nocapture`
+    /// prints the per-keystroke cost of ranking a realistic (~3.6k entry) list.
+    #[test]
+    fn keystroke_budget() {
+        let mut apps: Vec<AppEntry> = Vec::new();
+        let Ok(rd) = std::fs::read_dir("/usr/bin") else {
+            return;
+        };
+        for (i, e) in rd.flatten().enumerate().take(3000) {
+            let name = e.file_name().to_string_lossy().into_owned();
+            apps.push(entry(&format!("bin:{i}"), &name));
+        }
+        for (i, name) in [
+            "网易云音乐",
+            "腾讯会议",
+            "Visual Studio Code",
+            "MATE 顏色選擇區",
+        ]
+        .iter()
+        .enumerate()
+        {
+            apps.push(entry(&format!("desktop:{i}"), name));
+        }
+        // Pad to the size of a real index (~3.6k entries).
+        while apps.len() < 3600 {
+            let i = apps.len();
+            apps.push(entry(&format!("pad:{i}"), &format!("tool-number-{i}")));
+        }
+        if apps.is_empty() {
+            return;
+        }
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+        for query in ["f", "fire", "firef", "wyy", "wangyi", "qute"] {
+            let start = std::time::Instant::now();
+            let idxs = rank(&apps, query, &mut matcher, &mut scratch, None);
+            let ranked = start.elapsed();
+            let start = std::time::Instant::now();
+            for &i in idxs.iter().take(30) {
+                std::hint::black_box(highlight_indices(
+                    &apps[i],
+                    query,
+                    &mut matcher,
+                    &mut scratch,
+                ));
+            }
+            let highlighted = start.elapsed();
+            println!(
+                "[bench] query={query:<7} n={} rank={:?} highlight30={:?}",
+                apps.len(),
+                ranked,
+                highlighted
+            );
+        }
     }
 
     #[test]
