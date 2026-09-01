@@ -23,8 +23,8 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use crate::core::history::HistoryRecord;
 use crate::core::matcher::{self, MatcherScratch};
 use crate::core::model::AppEntry;
-use crate::launcher::{AppImageCache, AppItem, LauncherWindow, build_model_from};
-use slint::ModelRc;
+use crate::launcher::{AppImageCache, AppItem, LauncherWindow, build_items_vec, sync_model_in_place};
+use slint::{Model, VecModel};
 
 /// Rows the UI actually draws; the window shows ~14, so 16 fills the screen with
 /// a little scroll headroom while halving the per-keystroke model rebuild versus 30.
@@ -37,7 +37,7 @@ type Records = Arc<RwLock<HashMap<String, HistoryRecord>>>;
 pub struct SearchBackend {
     tx: Option<Sender<(u64, String)>>,
     generation: Arc<AtomicU64>,
-    // Kept so the very first list can be built synchronously (see `initial_model`).
+    // Kept so the very first list can be built synchronously (see `initial_items`).
     apps: Arc<Vec<AppEntry>>,
     history: Records,
     cache: AppImageCache,
@@ -115,16 +115,23 @@ impl SearchBackend {
                         continue;
                     }
 
-                    // Only `Send` data crosses the thread boundary; the model (which
-                    // holds non-`Send` `Image`s) is built on the UI thread, where the
-                    // icon cache lives.
+                    // Only `Send` data crosses the thread boundary; the row structs
+                    // (which hold non-`Send` `Image`s) are built on the UI thread, where
+                    // the icon cache lives, and then merged into the persistent model.
                     let apps_w2 = apps_w.clone();
                     let ui = ui.clone();
                     let _ = slint::invoke_from_event_loop(move || {
-                        let cache = AppImageCache::clone_on_ui_thread();
-                        let model = build_model_from(&apps_w2, &idxs, &highlights, &cache);
                         if let Some(ui) = ui.upgrade() {
-                            ui.set_items(model);
+                            let cache = AppImageCache::clone_on_ui_thread();
+                            let new_items = build_items_vec(&apps_w2, &idxs, &highlights, &cache);
+                            // Reuse the one model set at startup (which lives only on
+                            // the UI thread) instead of swapping in a fresh one, so the
+                            // on-screen rows are updated in place rather than rebuilt.
+                            if let Some(model) =
+                                ui.get_items().as_any().downcast_ref::<VecModel<AppItem>>()
+                            {
+                                sync_model_in_place(model, new_items);
+                            }
                             ui.set_selected_index(0);
                             ui.invoke_scroll_to_top();
                         }
@@ -143,10 +150,10 @@ impl SearchBackend {
         }
     }
 
-    /// Initial list, computed synchronously on the caller's thread.
-    /// `invoke_from_event_loop` only works once the event loop is running, so the
-    /// very first render is built here (the one-time cost at startup is fine).
-    pub fn initial_model(&self) -> ModelRc<AppItem> {
+    /// Initial list, computed synchronously on the caller's thread and merged
+    /// into the persistent model (see `sync_model_in_place`). `invoke_from_event_loop`
+    /// only works once the event loop is running, so the first render is built here.
+    pub fn initial_items(&self) -> Vec<AppItem> {
         let mut matcher = Matcher::new(MatcherConfig::DEFAULT);
         let mut scratch = MatcherScratch::default();
         let records = self.history.read().ok();
@@ -159,7 +166,7 @@ impl SearchBackend {
             .take(HIGHLIGHT_ROWS)
             .map(|_| Vec::new())
             .collect();
-        build_model_from(&self.apps, &idxs, &highlights, &self.cache)
+        build_items_vec(&self.apps, &idxs, &highlights, &self.cache)
     }
 
     /// Submit a new query. Only enqueues the work (nanoseconds) and returns

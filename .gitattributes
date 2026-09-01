@@ -1,0 +1,7 @@
+# 强制 GitHub 识别并统计所有的 .slint 文件
+*.slint linguist-language=Slint
+*.slint linguist-detectable=true
+
+# 确保所有的 .rs 文件不被当成第三方或自动生成的代码
+*.rs linguist-language=Rust
+*.rs linguist-detectable=true

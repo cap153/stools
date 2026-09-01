@@ -1,6 +1,7 @@
 #![cfg(windows)]
 
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
@@ -17,9 +18,8 @@ use crate::core::matcher::pinyin_fields;
 use crate::core::model::{AppEntry, EntryKind};
 use crate::core::search::SearchBackend;
 use crate::core::theme;
-use crate::launcher::LauncherWindow;
-
-use slint::{ComponentHandle, Model};
+use crate::launcher::{LauncherWindow, sync_model_in_place};
+use slint::{ComponentHandle, Model, VecModel};
 
 /// Directories that contain Start Menu shortcuts.
 fn start_menu_dirs() -> Vec<PathBuf> {
@@ -244,9 +244,11 @@ pub fn run() {
         ui.as_weak(),
         image_cache.clone(),
     ));
-    // First list is built synchronously (invoke_from_event_loop needs a running
-    // event loop, which isn't up yet here).
-    ui.set_items(search.initial_model());
+    // One persistent model is set once; every later result is merged in place so
+    // the on-screen rows are reused instead of rebuilt (see `sync_model_in_place`).
+    let items_model = Rc::new(VecModel::default());
+    ui.set_items(items_model.clone().into());
+    sync_model_in_place(&items_model, search.initial_items());
 
     // Live filtering while typing: submitted to the worker, results are pushed
     // back to the UI via `invoke_from_event_loop`.

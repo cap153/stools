@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use slint::{Image, ModelRc, SharedString, VecModel};
+use slint::{Image, Model, ModelRc, SharedString, VecModel};
 
 use crate::core::matcher;
 use crate::core::model::AppEntry;
@@ -108,24 +108,42 @@ pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache
     }
 }
 
-/// Build a Slint model from ranked indexes whose highlight positions have
-/// already been computed (in parallel with typing, see `core::search`).
-/// Hidden entries are filtered out first, then capped to the visible window, so
-/// a "no matches" search yields an empty model (rather than falling back to the
-/// full list).
-pub fn build_model_from(
+/// Build the row structs for the ranked indexes whose highlight positions have
+/// already been computed (in parallel with typing, see `core::search`). Hidden
+/// entries are filtered out first, then capped to the visible window, so a "no
+/// matches" search yields an empty list (rather than falling back to the full list).
+pub fn build_items_vec(
     apps: &[AppEntry],
     idxs: &[usize],
     highlights: &[Vec<usize>],
     cache: &AppImageCache,
-) -> ModelRc<AppItem> {
-    let items: Vec<AppItem> = idxs
-        .iter()
+) -> Vec<AppItem> {
+    idxs.iter()
         .filter_map(|&i| apps.get(i))
         .filter(|a| !a.hidden)
         .take(MAX_VISIBLE_ITEMS)
         .enumerate()
         .map(|(row, a)| to_ui_item(a, highlights.get(row).map_or(&[] as &[usize], |h| h), cache))
-        .collect();
-    ModelRc::new(VecModel::from(items))
+        .collect()
+}
+
+/// Update a persistent `VecModel` in place. Rows that are already on screen are
+/// reused — only their `row_data` changes — so Slint never destroys and rebuilds
+/// the row/icon/text widgets, which is what made `set_items` repaints stutter.
+pub fn sync_model_in_place(target: &VecModel<AppItem>, new_items: Vec<AppItem>) {
+    let old_len = target.row_count();
+    let new_len = new_items.len();
+    let common = old_len.min(new_len);
+    for i in 0..common {
+        target.set_row_data(i, new_items[i].clone());
+    }
+    if old_len > new_len {
+        for _ in new_len..old_len {
+            target.remove(target.row_count() - 1);
+        }
+    } else if new_len > old_len {
+        for item in new_items.into_iter().skip(old_len) {
+            target.push(item);
+        }
+    }
 }

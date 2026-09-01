@@ -4,6 +4,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::{Arc, RwLock};
 
 use crate::core::config::Config;
@@ -15,7 +16,8 @@ use crate::core::model::{AppEntry, EntryKind};
 use crate::core::path_utils::{self, normalize_dir};
 use crate::core::search::SearchBackend;
 use crate::core::theme;
-use crate::launcher::LauncherWindow;
+use crate::launcher::{LauncherWindow, sync_model_in_place};
+use slint::VecModel;
 
 use slint::{ComponentHandle, Model};
 
@@ -489,9 +491,11 @@ pub fn run() {
         ui.as_weak(),
         image_cache.clone(),
     ));
-    // First list is built synchronously (invoke_from_event_loop needs a running
-    // event loop, which isn't up yet here).
-    ui.set_items(search.initial_model());
+    // One persistent model is set once; every later result is merged in place so
+    // the on-screen rows are reused instead of rebuilt (see `sync_model_in_place`).
+    let items_model = Rc::new(VecModel::default());
+    ui.set_items(items_model.clone().into());
+    sync_model_in_place(&items_model, search.initial_items());
 
     let t_model = t0.elapsed();
     if std::env::var("STOOLS_DEBUG").is_ok() {
