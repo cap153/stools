@@ -13,7 +13,7 @@ use crate::core::indexer;
 use crate::core::keybind::KeybindingMap;
 use crate::core::matcher;
 use crate::core::model::{AppEntry, EntryKind};
-use crate::core::path_utils;
+use crate::core::path_utils::{self, normalize_dir};
 use crate::core::theme;
 use crate::launcher::{LauncherWindow, build_model};
 
@@ -49,8 +49,8 @@ fn desktop_dirs(custom_dirs: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     let mut seen = HashSet::new();
-    dirs.retain(|d| seen.insert(d.clone()));
-    dirs
+    dirs.retain(|d| seen.insert(normalize_dir(d.clone())));
+    dirs.into_iter().map(normalize_dir).collect()
 }
 
 // ---------------------------------------------------------------------------
