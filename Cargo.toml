@@ -5,7 +5,12 @@ edition = "2024"
 description = "A minimal Fuzzel-style application launcher built with Slint"
 
 [dependencies]
-slint = { version = "1.11", features = ["raw-window-handle-06"] }
+slint = { version = "1.11", default-features = false, features = [
+    "backend-winit",
+    "renderer-femtovg",
+    "compat-1-2",
+    "raw-window-handle-06",
+] }
 nucleo-matcher = "0.3"
 pinyin = { version = "0.10", features = ["plain", "heteronym"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -33,5 +38,8 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_Wind
 slint-build = "1.11"
 
 [profile.release]
-lto = true
-strip = true
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
