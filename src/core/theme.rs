@@ -79,7 +79,12 @@ pub fn resolve_font_family(families: &[String]) -> Option<String> {
 pub fn apply_theme(ui: &LauncherWindow, theme: &ThemeConfig) {
     ui.set_theme_bg(parse_fuzzel_color(&theme.background, ui.get_theme_bg()));
     ui.set_theme_text(parse_fuzzel_color(&theme.text, ui.get_theme_text()));
+    ui.set_theme_prompt(parse_fuzzel_color(&theme.prompt, ui.get_theme_prompt()));
     ui.set_theme_match(parse_fuzzel_color(&theme.match_color, ui.get_theme_match()));
+    ui.set_theme_selection_match(parse_fuzzel_color(
+        &theme.selection_match,
+        ui.get_theme_selection_match(),
+    ));
     ui.set_theme_selection_bg(parse_fuzzel_color(
         &theme.selection,
         ui.get_theme_selection_bg(),

@@ -1,20 +1,79 @@
+use bincode::{Decode, Encode};
 use nucleo_matcher::{Matcher, Utf32Str};
 use pinyin::ToPinyinMulti;
 
 use super::history::HistoryRecord;
 use super::model::AppEntry;
 
+/// Where one character's pinyin lives inside the precomputed pinyin fields.
+///
+/// `abbr_start..abbr_end` / `full_start..full_end` are indices into
+/// `pinyin_abbr` / `pinyin_full` (both pure ASCII, so char == byte offsets).
+/// Heteronym characters own several disjoint ranges — one per reading — so any
+/// hit inside them highlights the same underlying character.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Encode, Decode,
+)]
+pub struct FieldIndicesEntry {
+    pub name_idx: usize,
+    pub abbr_start: usize,
+    pub abbr_end: usize,
+    pub full_start: usize,
+    pub full_end: usize,
+}
+
+/// The full reverse map for one entry, sorted by pinyin offset so the entry
+/// covering a match can be found with a binary search.
+#[derive(
+    Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Encode, Decode,
+)]
+pub struct FieldIndices {
+    /// Sorted by `abbr_start` (and, for equal starts, `full_start`).
+    pub entries: Vec<FieldIndicesEntry>,
+}
+
+impl FieldIndices {
+    /// Character index in `name` owning the abbreviation character at `idx`.
+    pub fn name_idx_for_abbr(&self, idx: usize) -> Option<usize> {
+        self.lookup(idx, true)
+    }
+
+    /// Character index in `name` owning the full-pinyin character at `idx`.
+    pub fn name_idx_for_full(&self, idx: usize) -> Option<usize> {
+        self.lookup(idx, false)
+    }
+
+    fn lookup(&self, idx: usize, abbr: bool) -> Option<usize> {
+        let start = |e: &FieldIndicesEntry| if abbr { e.abbr_start } else { e.full_start };
+        let end = |e: &FieldIndicesEntry| if abbr { e.abbr_end } else { e.full_end };
+        // `entries` is sorted by start, so the first entry whose start is past
+        // `idx` bounds the candidate range.
+        let pos = self.entries.partition_point(|e| start(e) <= idx);
+        let entry = pos.checked_sub(1).and_then(|p| self.entries.get(p))?;
+        (start(entry) <= idx && idx < end(entry)).then_some(entry.name_idx)
+    }
+}
+
 /// Compute the full pinyin (syllables concatenated, no tones) and the initials
-/// (first letters) for a Chinese / mixed string. Non-han characters are appended
-/// verbatim (lowercased) so english names still match.
+/// (first letters) for a Chinese / mixed string, plus the reverse index map that
+/// points every pinyin character back to the character it belongs to.
+/// Non-han characters are appended verbatim (lowercased) so english names still
+/// match.
 ///
 /// For heteronym (multi-pronunciation) characters, *every* reading is included
 /// so the launcher matches regardless of which pronunciation the user types.
-pub fn pinyin_fields(input: &str) -> (String, String) {
+pub fn pinyin_fields(input: &str) -> (String, String, FieldIndices) {
     let mut full = String::with_capacity(input.len() + 8);
     let mut abbr = String::with_capacity(input.len());
+    let mut entries = Vec::with_capacity(input.len());
 
-    for ch in input.chars() {
+    let abbr_len = |s: &str| s.chars().count();
+
+    for (name_idx, ch) in input.chars().enumerate() {
+        let abbr_start = abbr_len(&abbr);
+        let full_start = abbr_len(&full);
+        let mut handled = false;
+
         if let Some(multi) = ch.to_pinyin_multi() {
             let mut seen_plain = std::collections::BTreeSet::new();
             let mut seen_abbr = std::collections::BTreeSet::new();
@@ -23,17 +82,175 @@ pub fn pinyin_fields(input: &str) -> (String, String) {
                 let letter = py.first_letter();
                 if seen_plain.insert(plain) {
                     full.push_str(plain);
+                    entries.push(FieldIndicesEntry {
+                        name_idx,
+                        abbr_start: abbr_start + seen_abbr.len(),
+                        abbr_end: abbr_start + seen_abbr.len() + 1,
+                        full_start: abbr_len(&full) - abbr_len(plain),
+                        full_end: abbr_len(&full),
+                    });
+                    handled = true;
                 }
                 if seen_abbr.insert(letter) {
-                    abbr.push_str(letter);
+                    if let Some(initial) = letter.chars().next() {
+                        abbr.push(initial);
+                    }
                 }
             }
-        } else {
+        }
+
+        if !handled {
+            // Non-han character: it maps to itself in both fields.
             full.push(ch.to_ascii_lowercase());
             abbr.push(ch.to_ascii_lowercase());
+            entries.push(FieldIndicesEntry {
+                name_idx,
+                abbr_start,
+                abbr_end: abbr_len(&abbr),
+                full_start,
+                full_end: abbr_len(&full),
+            });
         }
     }
-    (full, abbr)
+
+    entries.sort_by_key(|e| (e.abbr_start, e.full_start));
+    (full, abbr, FieldIndices { entries })
+}
+
+/// One run of characters for the UI to render (matched runs get the highlight
+/// colour and a heavier weight).
+pub struct TextSpanData {
+    pub text: String,
+    pub is_match: bool,
+}
+
+/// Stack-allocated match bitmap used by [`build_highlight_spans`]. App / binary
+/// names in the launcher never exceed this in practice, so a fixed array avoids
+/// per-keystroke heap traffic (a `HashSet` was visible in the keystroke budget).
+const MAX_HIGHLIGHT_CHARS: usize = 256;
+
+/// Split `name` into consecutive runs of matched / unmatched characters.
+/// `matched_indices` are character indices into `name`.
+pub fn build_highlight_spans(name: &str, matched_indices: &[usize]) -> Vec<TextSpanData> {
+    if matched_indices.is_empty() {
+        return vec![TextSpanData {
+            text: name.to_string(),
+            is_match: false,
+        }];
+    }
+
+    let mut is_match_map = [false; MAX_HIGHLIGHT_CHARS];
+    for &idx in matched_indices {
+        if idx < MAX_HIGHLIGHT_CHARS {
+            is_match_map[idx] = true;
+        }
+    }
+
+    let mut spans: Vec<TextSpanData> = Vec::with_capacity(4);
+    for (idx, ch) in name.chars().enumerate() {
+        let is_match = idx < MAX_HIGHLIGHT_CHARS && is_match_map[idx];
+        match spans.last_mut() {
+            Some(span) if span.is_match == is_match => span.text.push(ch),
+            _ => spans.push(TextSpanData {
+                text: ch.to_string(),
+                is_match,
+            }),
+        }
+    }
+    spans
+}
+
+/// Character indices of `name` that `query` matched, for the highlight layer.
+///
+/// Mirrors [`score`]: the name itself is tried first, then the pinyin
+/// abbreviation and finally the full pinyin, and the winning field's indices are
+/// mapped back to the characters that produced them.
+pub fn highlight_indices(
+    entry: &AppEntry,
+    query: &str,
+    matcher: &mut Matcher,
+    scratch: &mut MatcherScratch,
+) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let mut indices: Vec<u32> = Vec::new();
+
+    // 1. The name itself (latin names, or typing the characters verbatim).
+    let name_utf = to_utf32(&entry.name, &mut scratch.name_buf);
+    let query_utf = to_utf32(query, &mut scratch.query_buf);
+    if matcher
+        .fuzzy_indices(name_utf, query_utf, &mut indices)
+        .is_some()
+    {
+        return dedup_sorted(indices.into_iter().map(|i| i as usize));
+    }
+
+    // 2. Pinyin initials: one abbreviation character per name character.
+    if !entry.pinyin_abbr.is_empty() {
+        let abbr_utf = to_utf32(&entry.pinyin_abbr, &mut scratch.abbr_buf);
+        let query_utf = to_utf32(query, &mut scratch.query_buf);
+        if matcher
+            .fuzzy_indices(abbr_utf, query_utf, &mut indices)
+            .is_some()
+        {
+            // nucleo returns indices in ascending order, and the abbr map
+            // preserves that ordering, so we can dedup while collecting.
+            let mut out = Vec::with_capacity(indices.len());
+            let mut last = usize::MAX;
+            for i in indices {
+                if let Some(name_idx) = entry.pinyin_indices.name_idx_for_abbr(i as usize) {
+                    if name_idx != last {
+                        out.push(name_idx);
+                        last = name_idx;
+                    }
+                }
+            }
+            return out;
+        }
+    }
+
+    // 3. Full pinyin: a hit anywhere in a syllable highlights the character it
+    //    belongs to ("wangyi" → 网,易). Multiple syllables of the same character
+    //    can match (heteronym), so dedup after mapping.
+    if !entry.pinyin_full.is_empty() {
+        let full_utf = to_utf32(&entry.pinyin_full, &mut scratch.full_buf);
+        let query_utf = to_utf32(query, &mut scratch.query_buf);
+        if matcher
+            .fuzzy_indices(full_utf, query_utf, &mut indices)
+            .is_some()
+        {
+            let mut out = Vec::with_capacity(indices.len());
+            let mut last = usize::MAX;
+            for i in indices {
+                if let Some(name_idx) = entry.pinyin_indices.name_idx_for_full(i as usize) {
+                    if name_idx != last {
+                        out.push(name_idx);
+                        last = name_idx;
+                    }
+                }
+            }
+            return out;
+        }
+    }
+
+    Vec::new()
+}
+
+/// `nucleo` returns indices in ascending order, so a single-pass dedup is
+/// cheaper than a `HashSet` here.
+fn dedup_sorted(it: impl IntoIterator<Item = usize>) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut last = usize::MAX;
+    for v in it {
+        if v != last {
+            out.push(v);
+            last = v;
+        }
+    }
+    out
 }
 
 /// Convert a string into a `Utf32Str`. Non-ASCII input is materialized into
@@ -101,8 +318,12 @@ pub fn rank(
             let ea = &items[a];
             let eb = &items[b];
 
-            let ha = history.and_then(|h| h.get(&ea.id)).map_or(0u64, |r| r.last_used);
-            let hb = history.and_then(|h| h.get(&eb.id)).map_or(0u64, |r| r.last_used);
+            let ha = history
+                .and_then(|h| h.get(&ea.id))
+                .map_or(0u64, |r| r.last_used);
+            let hb = history
+                .and_then(|h| h.get(&eb.id))
+                .map_or(0u64, |r| r.last_used);
 
             // Tier 1: entries with history sort by recency (newest first).
             match (ha > 0, hb > 0) {
@@ -176,7 +397,7 @@ mod tests {
     use nucleo_matcher::{Config, Matcher};
 
     fn entry(id: &str, name: &str) -> AppEntry {
-        let (pf, pa) = pinyin_fields(name);
+        let (pf, pa, pi) = pinyin_fields(name);
         AppEntry {
             id: id.to_string(),
             name: name.to_string(),
@@ -187,7 +408,18 @@ mod tests {
             pinyin_abbr: pa,
             kind: crate::core::model::EntryKind::Desktop,
             subtitle: None,
+            pinyin_indices: pi,
         }
+    }
+
+    /// Character indices of `name` highlighted by `query`.
+    fn highlighted(name: &str, query: &str) -> Vec<usize> {
+        let e = entry("0", name);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+        let mut idxs = highlight_indices(&e, query, &mut matcher, &mut scratch);
+        idxs.sort_unstable();
+        idxs
     }
 
     fn matching(query: &str, names: &[&str]) -> Vec<String> {
@@ -203,8 +435,56 @@ mod tests {
     }
 
     #[test]
+    fn highlights_latin_substring() {
+        // "qute" → the leading run of qutebrowser.
+        assert_eq!(highlighted("qutebrowser", "qute"), vec![0, 1, 2, 3]);
+    }
+
+    #[test]
+    fn highlights_pinyin_initials() {
+        // "wyy" hits 网,易,云 → the original characters are highlighted.
+        assert_eq!(highlighted("网易云音乐", "wyy"), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn highlights_full_pinyin() {
+        // "wangyi" spans two syllables → 网,易.
+        assert_eq!(highlighted("网易云音乐", "wangyi"), vec![0, 1]);
+    }
+
+    #[test]
+    fn highlights_typed_characters() {
+        // Typing the characters themselves matches the name directly.
+        assert_eq!(highlighted("网易云音乐", "音乐"), vec![3, 4]);
+    }
+
+    #[test]
+    fn highlights_nothing_for_empty_query() {
+        assert!(highlighted("网易云音乐", "").is_empty());
+    }
+
+    #[test]
+    fn spans_merge_adjacent_runs() {
+        let idx: Vec<usize> = vec![0, 1, 2];
+        let spans = build_highlight_spans("网易云音乐", &idx);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "网易云");
+        assert!(spans[0].is_match);
+        assert_eq!(spans[1].text, "音乐");
+        assert!(!spans[1].is_match);
+    }
+
+    #[test]
+    fn spans_without_matches_are_a_single_run() {
+        let spans = build_highlight_spans("Firefox", &[]);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text, "Firefox");
+        assert!(!spans[0].is_match);
+    }
+
+    #[test]
     fn pinyin_fields_are_computed() {
-        let (full, abbr) = pinyin_fields("网易云音乐");
+        let (full, abbr, _) = pinyin_fields("网易云音乐");
         // Full pinyin includes the syllables of each character.
         assert!(full.contains("wangyiyun"), "full={full}");
         // Heteronym "乐" should retain its alternate "yue" reading.
@@ -249,11 +529,13 @@ mod tests {
     fn empty_query_orders_desktop_before_binary() {
         // Mixed kinds, no history: desktop apps must come before binaries,
         // each in original scan order within its tier.
-        let mut apps: Vec<AppEntry> = ["Btop", "Zed"].iter().enumerate()
+        let mut apps: Vec<AppEntry> = ["Btop", "Zed"]
+            .iter()
+            .enumerate()
             .map(|(i, n)| entry(&i.to_string(), n))
             .collect();
-        let (f1, a1) = pinyin_fields("vimdot");
-        let (f2, a2) = pinyin_fields("true");
+        let (f1, a1, i1) = pinyin_fields("vimdot");
+        let (f2, a2, i2) = pinyin_fields("true");
         apps.push(AppEntry {
             id: "bin:/usr/bin/vimdot".into(),
             name: "vimdot".into(),
@@ -264,6 +546,7 @@ mod tests {
             pinyin_abbr: a1,
             kind: crate::core::model::EntryKind::Binary,
             subtitle: None,
+            pinyin_indices: i1,
         });
         apps.push(AppEntry {
             id: "bin:/usr/bin/true".into(),
@@ -275,6 +558,7 @@ mod tests {
             pinyin_abbr: a2,
             kind: crate::core::model::EntryKind::Binary,
             subtitle: None,
+            pinyin_indices: i2,
         });
 
         let mut matcher = Matcher::new(Config::DEFAULT);
@@ -298,8 +582,20 @@ mod tests {
             .map(|(i, n)| entry(&i.to_string(), n))
             .collect();
         let mut hist = std::collections::HashMap::new();
-        hist.insert("1".into(), HistoryRecord { last_used: 300, count: 1 }); // Alacritty newest
-        hist.insert("0".into(), HistoryRecord { last_used: 100, count: 1 }); // Firefox older
+        hist.insert(
+            "1".into(),
+            HistoryRecord {
+                last_used: 300,
+                count: 1,
+            },
+        ); // Alacritty newest
+        hist.insert(
+            "0".into(),
+            HistoryRecord {
+                last_used: 100,
+                count: 1,
+            },
+        ); // Firefox older
         // GIMP has no history → should sort after any-with-history, before/after by stability.
 
         let mut matcher = Matcher::new(Config::DEFAULT);
@@ -315,11 +611,19 @@ mod tests {
     fn history_boost_promotes_frequent_item() {
         // Both match query "a". Alacritty is used a lot → should rank above Firefox
         // despite Firefox scoring better on the raw fuzzy match.
-        let apps: Vec<AppEntry> = ["Firefox", "Alacritty"].iter().enumerate()
+        let apps: Vec<AppEntry> = ["Firefox", "Alacritty"]
+            .iter()
+            .enumerate()
             .map(|(i, n)| entry(&i.to_string(), n))
             .collect();
         let mut hist = std::collections::HashMap::new();
-        hist.insert("1".into(), HistoryRecord { last_used: 10, count: 10 }); // Alacritty heavy use
+        hist.insert(
+            "1".into(),
+            HistoryRecord {
+                last_used: 10,
+                count: 10,
+            },
+        ); // Alacritty heavy use
 
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scratch = MatcherScratch::default();

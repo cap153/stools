@@ -68,7 +68,7 @@ bindsym $mod+space exec stools
 | `↑` / `↓` | Move selection                         |
 | `Enter`  | Launch the selected app and exit         |
 | `Esc`    | Exit immediately                         |
-| typing   | Live fuzzy / pinyin filtering            |
+| typing   | Live fuzzy / pinyin filtering, matched characters are highlighted |
 
 Note: the first run scans `.desktop` files *and* executable directories, writing a
 cache; subsequent runs load the cache instantly and refresh it in the background
@@ -125,6 +125,10 @@ Every entry is optional — deleting the file (or a single key) restores the
 built-in Dracula defaults. A parse error is reported on `stderr` and the defaults
 are used instead, so a broken config never prevents the launcher from starting.
 
+Matched characters of each result are highlighted in `match` / `selection-match`
+colour, including pinyin hits: typing `wyy` or `wangyi` highlights **网易云** in
+网易云音乐, and `qute` highlights **qute** in qutebrowser.
+
 ```toml
 path = ["$HOME/.cargo/bin", "~/.deno/bin"]   # extra scan dirs (~, $VAR, %VAR% expanded)
 
@@ -144,8 +148,9 @@ a = "stools"                  # summon the window (Windows global hotkey)
 [theme]                       # Fuzzel RRGGBBAA colours
 background = "282a36dd"
 text = "f8f8f2ff"
-match = "8be9fdff"
-selection-match = "8be9fdff"
+prompt = "586e75ff"          # the ">" input prompt
+match = "8be9fdff"           # matched characters
+selection-match = "8be9fdff" # matched characters in the selected row
 selection = "44475add"
 selection-text = "f8f8f2ff"
 border = "bd93f9ff"
@@ -185,6 +190,11 @@ On Windows, the binding mapped to `stools` becomes the global hotkey (default
 Colours use Fuzzel's `RRGGBBAA` notation (a leading `#` and the `RGB`/`RGBA`/
 `RRGGBB` forms are also accepted), so existing Fuzzel themes can be pasted in
 as-is; invalid values keep the built-in colour.
+
+`match` / `selection-match` colour the characters of the query inside each
+result name (the latter for the selected row); `prompt` colours the `>` input
+prompt — a deliberately subdued grey-blue, kept separate from the highlight
+colour.
 
 `font` is a priority list: the first family installed on the system wins (checked
 against the system font database), and glyphs missing from it — CJK in a Latin

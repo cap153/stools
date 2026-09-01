@@ -1,6 +1,12 @@
+export struct TextSpan {
+    text: string,
+    is_match: bool,
+}
+
 export struct AppItem {
     id: string,
     name: string,
+    spans: [TextSpan],
     exec: string,
     icon: image,
     subtitle: string,
@@ -17,7 +23,9 @@ export component LauncherWindow inherits Window {
     // --- Theme, injected from the config file (defaults: Dracula) ---
     in-out property <color> theme_bg: #282a36dd;
     in-out property <color> theme_text: #f8f8f2ff;
+    in-out property <color> theme_prompt: #586e75ff;
     in-out property <color> theme_match: #8be9fdff;
+    in-out property <color> theme_selection_match: #8be9fdff;
     in-out property <color> theme_selection_bg: #44475add;
     in-out property <color> theme_selection_text: #f8f8f2ff;
     in-out property <color> theme_border: #bd93f9ff;
@@ -95,7 +103,7 @@ export component LauncherWindow inherits Window {
 
                 Text {
                     text: ">";
-                    color: root.theme_match;
+                    color: root.theme_prompt;
                     font-size: 18px;
                     font-weight: 700;
                     vertical-alignment: center;
@@ -184,13 +192,25 @@ export component LauncherWindow inherits Window {
                         height: parent.height;
                         spacing: 12px;
 
-                        Text {
+                        // Matched characters are rendered as a chain of
+                        // zero-gap spans so the name still reads as one word.
+                        // `alignment: start` is required: the default is
+                        // `stretch`, which would split the row evenly between
+                        // each span and leave large gaps (e.g. "qu" / "te…").
+                        HorizontalLayout {
                             horizontal-stretch: 1;
-                            text: item.name;
-                            color: root.selected_index == index ? root.theme_selection_text : root.theme_text;
-                            font-size: 14.5px;
-                            vertical-alignment: center;
-                            overflow: elide;
+                            alignment: start;
+                            spacing: 0px;
+
+                            for span in item.spans : Text {
+                                text: span.text;
+                                color: span.is_match
+                                    ? (root.selected_index == index ? root.theme_selection_match : root.theme_match)
+                                    : (root.selected_index == index ? root.theme_selection_text : root.theme_text);
+                                font-size: 14.5px;
+                                font-weight: span.is_match ? 700 : 400;
+                                vertical-alignment: center;
+                            }
                         }
 
                         if item.subtitle != "" : subtitle_box := Rectangle {

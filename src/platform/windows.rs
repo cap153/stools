@@ -83,7 +83,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
             if !seen.insert(path.to_string_lossy().to_lowercase()) {
                 continue;
             }
-            let (pinyin_full, pinyin_abbr) = pinyin_fields(stem);
+            let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(stem);
             entries.push(AppEntry {
                 id: format!("bin:{}", path.to_string_lossy()),
                 name: stem.to_string(),
@@ -94,6 +94,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 pinyin_abbr,
                 kind: EntryKind::Binary,
                 subtitle: None,
+                pinyin_indices,
             });
         }
     }
@@ -123,7 +124,7 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
         if stem.is_empty() {
             continue;
         }
-        let (pinyin_full, pinyin_abbr) = pinyin_fields(&stem);
+        let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&stem);
         entries.push(AppEntry {
             id: path.to_string_lossy().into_owned(),
             name: stem,
@@ -135,6 +136,7 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
             pinyin_abbr,
             kind: EntryKind::Desktop,
             subtitle: None,
+            pinyin_indices,
         });
     }
 
@@ -237,7 +239,14 @@ pub fn run() {
         &mut scratch,
         Some(&history.borrow().records),
     );
-    ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
+    ui.set_items(build_model(
+        &apps,
+        &initial_idxs,
+        "",
+        &mut matcher,
+        &mut scratch,
+        &image_cache,
+    ));
 
     // Live filtering while typing.
     let search_weak = weak.clone();
@@ -247,6 +256,7 @@ pub fn run() {
             let Some(ui) = search_weak.upgrade() else {
                 return;
             };
+            let query = query.to_string();
             let idxs = rank(
                 &apps,
                 &query,
@@ -254,7 +264,14 @@ pub fn run() {
                 &mut scratch,
                 Some(&history.borrow().records),
             );
-            ui.set_items(build_model(&apps, &idxs, &image_cache));
+            ui.set_items(build_model(
+                &apps,
+                &idxs,
+                &query,
+                &mut matcher,
+                &mut scratch,
+                &image_cache,
+            ));
             ui.set_selected_index(0);
         });
     }

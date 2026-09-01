@@ -71,6 +71,8 @@ where
 pub struct ThemeConfig {
     pub background: String,
     pub text: String,
+    /// Colour of the `>` input prompt.
+    pub prompt: String,
     #[serde(rename = "match", alias = "match_color")]
     pub match_color: String,
     #[serde(rename = "selection-match", alias = "selection_match")]
@@ -89,6 +91,7 @@ impl Default for ThemeConfig {
         Self {
             background: "282a36dd".into(),
             text: "f8f8f2ff".into(),
+            prompt: "586e75ff".into(),
             match_color: "8be9fdff".into(),
             selection_match: "8be9fdff".into(),
             selection: "44475add".into(),
@@ -174,8 +177,12 @@ a = "stools"       # summon the window (global hotkey on Windows)
 # The defaults below are Dracula.
 # -----------------------------------------------------------------------------
 [theme]
+# Colours are RRGGBBAA. "match" / "selection-match" colour the characters of
+# the query inside an entry name (selection-match when the row is selected),
+# "prompt" colours the ">" input prompt.
 background = "282a36dd"
 text = "f8f8f2ff"
+prompt = "586e75ff"
 match = "8be9fdff"
 selection-match = "8be9fdff"
 selection = "44475add"
@@ -341,6 +348,7 @@ mod tests {
         let theme = ThemeConfig::default();
         assert_eq!(cfg.theme.background, theme.background);
         assert_eq!(cfg.theme.text, theme.text);
+        assert_eq!(cfg.theme.prompt, theme.prompt);
         assert_eq!(cfg.theme.match_color, theme.match_color);
         assert_eq!(cfg.theme.selection_match, theme.selection_match);
         assert_eq!(cfg.theme.selection, theme.selection);

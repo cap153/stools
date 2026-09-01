@@ -2,8 +2,10 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use nucleo_matcher::Matcher;
 use slint::{Image, ModelRc, SharedString, VecModel};
 
+use crate::core::matcher::{self, MatcherScratch};
 use crate::core::model::AppEntry;
 
 slint::include_modules!();
@@ -38,16 +40,30 @@ impl AppImageCache {
             return img.clone();
         }
         let img = Image::load_from_path(path).unwrap_or_else(|_| Image::default());
-        self.map.borrow_mut().insert(path.to_path_buf(), img.clone());
+        self.map
+            .borrow_mut()
+            .insert(path.to_path_buf(), img.clone());
         img
     }
 }
 
-pub fn to_ui_item(a: &AppEntry, cache: &AppImageCache) -> AppItem {
+/// Build one row. `matched_indices` (character indices into the name) turn the
+/// name into coloured spans so the hit characters can be highlighted — including
+/// hits that came from pinyin, which are mapped back to their characters.
+pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache) -> AppItem {
     let subtitle = a.subtitle.as_deref().unwrap_or("");
+    let spans = matcher::build_highlight_spans(&a.name, matched_indices)
+        .into_iter()
+        .map(|span| TextSpan {
+            text: span.text.into(),
+            is_match: span.is_match,
+        })
+        .collect::<Vec<_>>();
+
     AppItem {
         id: SharedString::from(a.id.as_str()),
         name: SharedString::from(a.name.as_str()),
+        spans: ModelRc::new(VecModel::from(spans)),
         exec: SharedString::from(a.exec.as_str()),
         icon: match &a.icon_path {
             Some(p) => cache.get(Path::new(p)),
@@ -60,13 +76,26 @@ pub fn to_ui_item(a: &AppEntry, cache: &AppImageCache) -> AppItem {
 /// Build a Slint model from a set of ranked indexes. Hidden entries are
 /// filtered out first, then capped to the visible window, so a "no matches"
 /// search yields an empty model (rather than falling back to the full list).
-pub fn build_model(apps: &[AppEntry], idxs: &[usize], cache: &AppImageCache) -> ModelRc<AppItem> {
+///
+/// `query` is re-matched per visible row only (≤ 30) to compute the highlighted
+/// characters, which keeps the per-keystroke cost bounded.
+pub fn build_model(
+    apps: &[AppEntry],
+    idxs: &[usize],
+    query: &str,
+    matcher: &mut Matcher,
+    scratch: &mut MatcherScratch,
+    cache: &AppImageCache,
+) -> ModelRc<AppItem> {
     let items: Vec<AppItem> = idxs
         .iter()
         .filter_map(|&i| apps.get(i))
         .filter(|a| !a.hidden)
         .take(MAX_VISIBLE_ITEMS)
-        .map(|a| to_ui_item(a, cache))
+        .map(|a| {
+            let highlights = matcher::highlight_indices(a, query, matcher, scratch);
+            to_ui_item(a, &highlights, cache)
+        })
         .collect();
     ModelRc::new(VecModel::from(items))
 }

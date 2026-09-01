@@ -228,7 +228,7 @@ fn parse_desktop(path: &Path, _id: &str, icon_map: &HashMap<String, PathBuf>) ->
     }
     let name_str = localized_names.pop().or(name)?;
     let exec_value = exec?;
-    let (pinyin_full, pinyin_abbr) = matcher::pinyin_fields(&name_str);
+    let (pinyin_full, pinyin_abbr, pinyin_indices) = matcher::pinyin_fields(&name_str);
 
     Some(AppEntry {
         // id is the .desktop file's real path so a later same-name collision can
@@ -242,6 +242,7 @@ fn parse_desktop(path: &Path, _id: &str, icon_map: &HashMap<String, PathBuf>) ->
         pinyin_abbr,
         kind: EntryKind::Desktop,
         subtitle: None,
+        pinyin_indices,
     })
 }
 
@@ -280,7 +281,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 continue;
             }
 
-            let (pinyin_full, pinyin_abbr) = matcher::pinyin_fields(name);
+            let (pinyin_full, pinyin_abbr, pinyin_indices) = matcher::pinyin_fields(name);
             let id = format!("bin:{}", path.to_string_lossy());
             // Canonicalize so symlinked directories (e.g. /bin -> /usr/bin) don't
             // yield the same physical file twice.
@@ -301,6 +302,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 pinyin_abbr,
                 kind: EntryKind::Binary,
                 subtitle: None,
+                pinyin_indices,
             });
         }
     }
@@ -481,7 +483,14 @@ pub fn run() {
         &mut scratch,
         Some(&history.borrow().records),
     );
-    ui.set_items(build_model(&apps, &initial_idxs, &image_cache));
+    ui.set_items(build_model(
+        &apps,
+        &initial_idxs,
+        "",
+        &mut matcher,
+        &mut scratch,
+        &image_cache,
+    ));
     let t_model = t0.elapsed();
     if std::env::var("STOOLS_DEBUG").is_ok() {
         eprintln!("[stools] initial-n={}", ui.get_items().row_count());
@@ -495,14 +504,22 @@ pub fn run() {
                 return;
             };
             let st = std::time::Instant::now();
+            let query = query.to_string();
             let idxs = matcher::rank(
                 &apps,
-                &query.to_string(),
+                &query,
                 &mut matcher,
                 &mut scratch,
                 Some(&history.borrow().records),
             );
-            ui.set_items(build_model(&apps, &idxs, &image_cache));
+            ui.set_items(build_model(
+                &apps,
+                &idxs,
+                &query,
+                &mut matcher,
+                &mut scratch,
+                &image_cache,
+            ));
             ui.set_selected_index(0);
             if std::env::var("STOOLS_DEBUG").is_ok() {
                 eprintln!(
