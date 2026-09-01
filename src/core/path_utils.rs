@@ -1,34 +1,17 @@
 use std::path::{Path, PathBuf};
 
-/// Map of known prefix → display alias, checked in order.
-/// The longest matching prefix wins.
-const KNOWN_PREFIXES: &[(&str, &str)] = &[
-    ("/home/linuxbrew/.linuxbrew", "$HOMEBREW_PREFIX"),
-    ("/opt/rocm", "$ROCM_HOME"),
-];
-
 /// Prettify an absolute path for display:
 ///   /home/user/.cargo/bin/rg → ~/.cargo/bin/rg
-///   /opt/rocm/bin/rocm-smi  → $ROCM_HOME/bin/rocm-smi
 ///   /usr/bin/ls              → /usr/bin/ls (no transformation)
 pub fn prettify_path(path: &Path) -> String {
     let s = path.to_string_lossy();
 
-    // 1. Try the home directory → ~ ($HOME on Linux, %USERPROFILE% on Windows)
+    // Try the home directory → ~ ($HOME on Linux, %USERPROFILE% on Windows)
     for var in ["HOME", "USERPROFILE"] {
         if let Ok(home) = std::env::var(var) {
             if !home.is_empty() && s.starts_with(&home) {
                 return format!("~{}", &s[home.len()..]);
             }
-        }
-    }
-
-    // 2. Try known prefixes (longest first via sort)
-    let mut sorted = KNOWN_PREFIXES.to_vec();
-    sorted.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-    for (prefix, alias) in sorted {
-        if s.starts_with(prefix) {
-            return format!("{}{}", alias, &s[prefix.len()..]);
         }
     }
 
@@ -46,16 +29,7 @@ pub fn default_binary_dirs() -> Vec<PathBuf> {
 
     if !home.is_empty() {
         let home = PathBuf::from(&home);
-        for rel in [
-            ".local/bin",
-            ".cargo/bin",
-            ".deno/bin",
-            ".bun/bin",
-            ".zvm/bin",
-            ".local/share/zvm/bin",
-        ] {
-            dirs.push(home.join(rel));
-        }
+        dirs.push(home.join(".local/bin"));
     }
 
     for system in ["/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"] {
@@ -64,8 +38,6 @@ pub fn default_binary_dirs() -> Vec<PathBuf> {
 
     // Linuxbrew
     dirs.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin"));
-    // ROCm
-    dirs.push(PathBuf::from("/opt/rocm/bin"));
 
     dirs
 }
@@ -138,32 +110,22 @@ mod tests {
     }
 
     #[test]
-    fn prettifies_known_prefix() {
-        assert_eq!(
-            prettify_path(Path::new("/opt/rocm/bin/rocm-smi")),
-            "$ROCM_HOME/bin/rocm-smi"
-        );
-    }
-
-    #[test]
     fn leaves_system_path_alone() {
         assert_eq!(prettify_path(Path::new("/usr/bin/ls")), "/usr/bin/ls");
     }
 
     #[test]
     fn config_paths_dont_duplicate_builtin_dirs() {
-        // ~/.cargo/bin and ~/.deno/bin are both built-in binary directories.
-        let raw = ["$HOME/.cargo/bin".into(), "~/.deno/bin".into()];
+        // ~/.local/bin is a built-in binary directory.
+        let raw = ["$HOME/.local/bin".into(), "~/.local/bin".into()];
         let merged = merge_binary_dirs(&raw);
         let home = dirs::home_dir().expect("home dir");
-        for rel in [".cargo/bin", ".deno/bin"] {
-            let dir = home.join(rel);
-            assert!(
-                merged.iter().filter(|d| **d == dir).count() <= 1,
-                "{rel} appears {} times",
-                merged.iter().filter(|d| **d == dir).count()
-            );
-        }
+        let dir = home.join(".local/bin");
+        assert!(
+            merged.iter().filter(|d| **d == dir).count() <= 1,
+            ".local/bin appears {} times",
+            merged.iter().filter(|d| **d == dir).count()
+        );
     }
 
     #[test]
