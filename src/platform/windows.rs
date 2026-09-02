@@ -88,7 +88,9 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 id: format!("bin:{}", path.to_string_lossy()),
                 name: stem.to_string(),
                 exec: path.to_string_lossy().into_owned(),
-                icon_path: None,
+                // Icons of the extra directories' binaries come from the .exe
+                // itself, extracted through the shell.
+                icon_path: Some(path.to_string_lossy().into_owned()),
                 hidden: false,
                 pinyin_full,
                 pinyin_abbr,
@@ -130,7 +132,9 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
             name: stem,
             // Kept as the .lnk path; ShellExecute (open crate) launches it.
             exec: path.to_string_lossy().into_owned(),
-            icon_path: None,
+            // The icon is extracted from this path at render time (see
+            // `platform::windows_icon`), since a .lnk has no icon file.
+            icon_path: Some(path.to_string_lossy().into_owned()),
             hidden: false,
             pinyin_full,
             pinyin_abbr,
@@ -319,6 +323,9 @@ pub fn run() {
 
     let tray = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(menu))
+        // Without this the menu pops up on left click too, and the native popup
+        // steals the focus from the launcher window we are trying to show.
+        .with_menu_on_left_click(false)
         .with_tooltip("stools launcher")
         .build();
 

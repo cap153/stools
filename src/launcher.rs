@@ -74,7 +74,17 @@ impl AppImageCache {
         if let Some(img) = self.map.borrow().get(path) {
             return img.clone();
         }
-        let img = Image::load_from_path(path).unwrap_or_else(|_| Image::default());
+
+        // On Windows the stored path is the shortcut/executable itself, whose icon
+        // has to be pulled out of the shell rather than decoded from an image file.
+        #[cfg(windows)]
+        let img = crate::platform::windows_icon::extract_icon_from_path(path)
+            .or_else(|| Image::load_from_path(path).ok())
+            .unwrap_or_default();
+
+        #[cfg(not(windows))]
+        let img = Image::load_from_path(path).unwrap_or_default();
+
         self.map
             .borrow_mut()
             .insert(path.to_path_buf(), img.clone());
