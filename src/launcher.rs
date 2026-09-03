@@ -97,6 +97,13 @@ impl AppImageCache {
 /// hits that came from pinyin, which are mapped back to their characters.
 pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache) -> AppItem {
     let subtitle = a.subtitle.as_deref().unwrap_or("");
+    let idle_subtitle = if subtitle.is_empty() {
+        String::new()
+    } else {
+        // Head...tail form that fits the idle half-row; the full path is still used
+        // for the marquee when the row is selected.
+        crate::core::path_utils::abbreviate_path(subtitle, 26)
+    };
     let spans = matcher::build_highlight_spans(&a.name, matched_indices)
         .into_iter()
         .map(|span| TextSpan {
@@ -115,6 +122,7 @@ pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache
             None => Image::default(),
         },
         subtitle: subtitle.into(),
+        idle_subtitle: idle_subtitle.into(),
     }
 }
 

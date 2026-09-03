@@ -9,7 +9,8 @@ export struct AppItem {
     spans: [TextSpan],
     exec: string,
     icon: image,
-    subtitle: string,
+    subtitle: string,        // full path, used for the scrolling marquee when selected
+    idle_subtitle: string,   // abbreviated head...tail path, shown while idle
 }
 
 export component LauncherWindow inherits Window {
@@ -213,7 +214,7 @@ export component LauncherWindow inherits Window {
                             // by a state transition: `animate` is disabled when a row is
                             // created in its final selected state, but animation-tick()
                             // always runs, so an overlong first hit scrolls from frame one.
-                            property <length> marquee_gap: 32px;
+                            property <length> marquee_gap: 16px;
                             property <length> loop_dist: name_track.preferred-width + self.marquee_gap;
                             property <bool> is_overflow: name_track.preferred-width > self.width;
                             property <bool> active: root.selected_index == index && self.is_overflow;
@@ -265,10 +266,9 @@ export component LauncherWindow inherits Window {
                             height: parent.height;
                             clip: true;
 
-                            property <length> marquee_gap: 32px;
-                            property <length> loop_dist: sub1.preferred-width + self.marquee_gap;
-                            property <bool> is_overflow: sub1.preferred-width > self.width;
-                            property <bool> active: root.selected_index == index && self.is_overflow;
+                            // Tighter seam between the two marquee ribbons.
+                            property <length> marquee_gap: 16px;
+                            property <bool> active: root.selected_index == index;
 
                             // Progress is shared with the name ribbon (same cycle),
                             // but each box has its own distance, so the two sides
@@ -276,35 +276,38 @@ export component LauncherWindow inherits Window {
                             property <float> progress: Math.mod(animation-tick(), root.theme_marquee_duration) / root.theme_marquee_duration;
                             property <length> scroll_offset: -self.progress * self.loop_dist;
 
-                            // Leading copy. While idle it is pushed to the right
-                            // edge of its half, so the path hugs the window's
-                            // right side (and an overflowing path shows its tail,
-                            // which is where the file name is). While scrolling
-                            // it starts from the left instead, so the ribbon reads
-                            // in natural order.
+                            // Leading copy. While idle (not selected) it shows the
+                            // abbreviated head...tail form, right-aligned to the
+                            // window edge; while selected it shows the full path.
                             sub1 := Text {
-                                text: item.subtitle;
+                                text: subtitle_box.active ? item.subtitle : item.idle_subtitle;
                                 color: #6272a4;
                                 font-size: 12px;
                                 height: 100%;
                                 vertical-alignment: center;
 
-                                x: subtitle_box.active
+                                x: subtitle_box.active && subtitle_box.is_overflow
                                     ? subtitle_box.scroll_offset
                                     : subtitle_box.width - self.preferred-width;
                             }
 
-                            // Trailing copy sits exactly loop_dist behind the lead, completing
-                            // the seamless loop; only rendered while active (matches lead).
-                            if subtitle_box.active : Text {
+                            // Trailing copy carries the full path and is laid out
+                            // even while hidden, so its width is the authoritative
+                            // measure of overflow — independent of the abbreviated
+                            // leading copy shown while idle.
+                            sub2 := Text {
                                 text: item.subtitle;
                                 color: #6272a4;
                                 font-size: 12px;
                                 height: 100%;
                                 vertical-alignment: center;
+                                visible: subtitle_box.active && subtitle_box.is_overflow;
 
                                 x: sub1.x + subtitle_box.loop_dist;
                             }
+
+                            property <length> loop_dist: sub2.preferred-width + self.marquee_gap;
+                            property <bool> is_overflow: sub2.preferred-width > self.width;
                         }
                     }
 
