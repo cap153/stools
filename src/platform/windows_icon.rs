@@ -8,7 +8,7 @@
 //! is then read into an RGBA buffer and wrapped in a Slint `Image`.
 
 use std::os::windows::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use slint::{Image, Rgba8Pixel, SharedPixelBuffer};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -18,9 +18,44 @@ use windows_sys::Win32::Graphics::Gdi::{
 use windows_sys::Win32::UI::Shell::{SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON, SHGetFileInfoW};
 use windows_sys::Win32::UI::WindowsAndMessaging::{DestroyIcon, GetIconInfo, HICON, ICONINFO};
 
-/// Extract the shell icon for `path` (a `.lnk`, `.exe`, or any file the shell
-/// knows how to render) as a Slint image.
+/// Extract the icon for `path` as a Slint image.
+///
+/// Handles shortcut files the shell cannot: a `.url` (Steam drops one per game on
+/// the desktop) names its icon in the file body, which beats the generic "URL
+/// file" icon the shell would hand back.
 pub fn extract_icon_from_path(path: &Path) -> Option<Image> {
+    if let Some(icon_file) = url_icon_file(path) {
+        if let Some(img) = Image::load_from_path(&icon_file)
+            .ok()
+            // `IconFile` may also point at an .exe/.dll, which needs the shell.
+            .or_else(|| shell_icon(&icon_file))
+        {
+            return Some(img);
+        }
+    }
+    shell_icon(path)
+}
+
+/// The `IconFile=` target of an internet shortcut, if it declares one.
+fn url_icon_file(path: &Path) -> Option<PathBuf> {
+    if !path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("url"))
+    {
+        return None;
+    }
+
+    let content = std::fs::read_to_string(path).ok()?;
+    content.lines().find_map(|line| {
+        let value = line.trim().strip_prefix("IconFile=")?.trim();
+        (!value.is_empty()).then(|| PathBuf::from(value))
+    })
+}
+
+/// Ask the shell for the icon it associates with `path` (a `.lnk`, `.exe`, or any
+/// file the shell knows how to render) as a Slint image.
+fn shell_icon(path: &Path) -> Option<Image> {
     let wide_path: Vec<u16> = path
         .as_os_str()
         .encode_wide()

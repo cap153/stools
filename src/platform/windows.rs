@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
+use std::thread;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
@@ -16,46 +17,83 @@ use crate::core::history::HistoryManager;
 use crate::core::keybind::{KeybindingMap, hotkey_code_name};
 use crate::core::matcher::pinyin_fields;
 use crate::core::model::{AppEntry, EntryKind};
-use crate::core::search::SearchBackend;
+use crate::core::search::{AppIndex, SearchBackend};
 use crate::core::theme;
 use crate::launcher::{LauncherWindow, sync_model_in_place};
 use slint::{ComponentHandle, Model, VecModel};
 
-/// Directories that contain Start Menu shortcuts.
-fn start_menu_dirs() -> Vec<PathBuf> {
+/// Directories a launcher is expected to cover: both Start Menu roots (the
+/// per-user one and the common one installers write to — including the shortcuts
+/// that sit directly in the root) and both desktops.
+fn app_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
     if let Some(appdata) = std::env::var_os("APPDATA") {
-        dirs.push(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu\\Programs"));
+        dirs.push(PathBuf::from(appdata).join("Microsoft\\Windows\\Start Menu"));
     }
     if let Some(programdata) = std::env::var_os("ProgramData") {
-        dirs.push(PathBuf::from(programdata).join("Microsoft\\Windows\\Start Menu\\Programs"));
+        dirs.push(PathBuf::from(programdata).join("Microsoft\\Windows\\Start Menu"));
     }
+
+    // The user's desktop, the shared one (`C:\Users\Public\Desktop`), and the
+    // OneDrive-redirected location — when Desktop is redirected elsewhere, the
+    // icons live under OneDrive, not under USERPROFILE.
+    if let Some(userprofile) = std::env::var_os("USERPROFILE") {
+        let home = PathBuf::from(userprofile);
+        dirs.push(home.join("Desktop"));
+        dirs.push(home.join("OneDrive").join("Desktop"));
+    }
+    if let Some(public) = std::env::var_os("PUBLIC") {
+        dirs.push(PathBuf::from(public).join("Desktop"));
+    }
+
+    // Canonicalizing collapses two routes to the same folder (a redirected
+    // Desktop junction, say) so its files are not indexed twice.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    dirs.retain(|d| {
+        let key = std::fs::canonicalize(d).unwrap_or_else(|_| d.clone());
+        seen.insert(key)
+    });
+
     dirs
 }
 
+/// Guard against junction loops (a folder linked back into itself).
+const MAX_WALK_DEPTH: usize = 8;
+
 fn walk_dir(dir: &Path, out: &mut Vec<PathBuf>) {
+    walk_dir_inner(dir, out, 0);
+}
+
+fn walk_dir_inner(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in rd.flatten() {
         let path = entry.path();
-        let ft = entry.file_type();
-        if ft.as_ref().map(|t| t.is_dir()).unwrap_or(false) {
-            walk_dir(&path, out);
-        } else {
-            out.push(path);
+        // Directories are descended into; everything else is collected. Note that
+        // `is_file()` would drop symlinked executables, so only directories are
+        // tested for — and they are depth-limited to survive junction cycles.
+        match entry.file_type() {
+            Ok(ft) if ft.is_dir() => {
+                if depth < MAX_WALK_DEPTH {
+                    walk_dir_inner(&path, out, depth + 1);
+                }
+            }
+            _ => out.push(path),
         }
     }
 }
 
-/// Extensions treated as launchable when scanning the config file's `path` list.
-const EXECUTABLE_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "lnk", "msc"];
+/// Extensions treated as launchable: shortcuts, binaries, scripts and `.url`
+/// files (Steam drops one on the desktop per game, and they are not `.lnk`).
+const APP_EXTENSIONS: &[&str] = &["lnk", "exe", "bat", "cmd", "com", "ps1", "msc", "url"];
 
-fn is_executable(path: &Path) -> bool {
+fn is_launchable_app(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.to_ascii_lowercase())
-        .is_some_and(|e| EXECUTABLE_EXTENSIONS.contains(&e.as_str()))
+        .is_some_and(|e| APP_EXTENSIONS.contains(&e.as_str()))
 }
 
 /// Scan the extra directories from the config file (non-recursive) for
@@ -71,7 +109,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
         let mut files: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
         files.sort();
         for path in files {
-            if !path.is_file() || !is_executable(&path) {
+            if !is_launchable_app(&path) {
                 continue;
             }
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
@@ -104,18 +142,21 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
     entries
 }
 
-/// Scan Start Menu `.lnk` files (plus the config file's extra directories) to
-/// build the app list.
+/// Scan the Start Menu and both desktops for launchable files (`.lnk`, `.exe`,
+/// `.bat`, `.cmd`, `.url`, …), plus the config file's extra directories, to build
+/// the app list. Runs on a worker thread, so it may be repeated freely.
 pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
     let mut files = Vec::new();
-    for dir in start_menu_dirs() {
+    for dir in app_search_dirs() {
         walk_dir(&dir, &mut files);
     }
     files.sort();
 
     let mut entries = Vec::new();
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for path in files {
-        if path.extension().and_then(|e| e.to_str()) != Some("lnk") {
+        if !is_launchable_app(&path) {
             continue;
         }
         let stem = path
@@ -126,15 +167,23 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
         if stem.is_empty() {
             continue;
         }
+        // A shortcut frequently exists in both the personal and the common
+        // directory: keying on the path keeps a single row per file.
+        let path_str = path.to_string_lossy().into_owned();
+        if !seen_paths.insert(path_str.to_lowercase()) {
+            continue;
+        }
         let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&stem);
         entries.push(AppEntry {
-            id: path.to_string_lossy().into_owned(),
+            id: path_str.clone(),
             name: stem,
-            // Kept as the .lnk path; ShellExecute (open crate) launches it.
-            exec: path.to_string_lossy().into_owned(),
-            // The icon is extracted from this path at render time (see
-            // `platform::windows_icon`), since a .lnk has no icon file.
-            icon_path: Some(path.to_string_lossy().into_owned()),
+            // Kept as the shortcut's own path; ShellExecute (open crate) resolves
+            // `.lnk`, `.url` and `.exe` alike.
+            exec: path_str.clone(),
+            // Icons come from the file itself at render time: they are either
+            // embedded (`.exe`) or resolved by the shell (see
+            // `platform::windows_icon`).
+            icon_path: Some(path_str),
             hidden: false,
             pinyin_full,
             pinyin_abbr,
@@ -190,6 +239,50 @@ fn hide_window(ui: &LauncherWindow) {
     let _ = ui.hide();
 }
 
+/// Keeps the index in step with the file system.
+///
+/// The scan runs on its own thread and is kicked off every time the launcher is
+/// summoned, so an app dropped on the desktop or a shortcut added to the Start
+/// Menu shows up on the next summon instead of after a daemon restart. The panel
+/// itself is raised first and never waits: the list is only touched if the scan
+/// actually found something different (see `AppIndex::replace_if_changed`).
+#[derive(Clone)]
+struct Rescanner {
+    // `Arc` so the handle can be shared with the (Send-only) hotkey and menu
+    // handlers; `Mutex` because a `Sender` is not `Sync` on its own.
+    tx: Arc<Mutex<std::sync::mpsc::Sender<()>>>,
+}
+
+impl Rescanner {
+    fn spawn(index: AppIndex, dirs: Vec<PathBuf>) -> Self {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        thread::spawn(move || {
+            // Ends when the last `Rescanner` clone (and thus the sender) is dropped.
+            while rx.recv().is_ok() {
+                // Collapse a burst of summons into a single scan.
+                while rx.try_recv().is_ok() {}
+                index.replace_if_changed(scan_apps(&dirs));
+            }
+        });
+        Self {
+            tx: Arc::new(Mutex::new(tx)),
+        }
+    }
+
+    /// Ask for a rescan. Cheap and non-blocking: at most one scan is queued.
+    fn request(&self) {
+        if let Ok(tx) = self.tx.lock() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+/// Raise the launcher, then quietly bring the index up to date.
+fn show_launcher(ui: &LauncherWindow, rescanner: &Rescanner) {
+    show_and_focus(ui);
+    rescanner.request();
+}
+
 /// Translate a configured binding into a `global-hotkey` shortcut.
 fn build_hotkey(mask: crate::core::keybind::ModifiersMask, key: &str) -> Option<HotKey> {
     let code = Code::from_str(&hotkey_code_name(key)?).ok()?;
@@ -215,7 +308,9 @@ pub fn run() {
     let config = Config::load_or_create();
     let mut extra_dirs = config.path.clone();
     extra_dirs.extend(std::env::args().skip(1));
-    let apps = scan_apps(&crate::core::path_utils::resolve_dirs(&extra_dirs));
+    // Resolved once and kept: the background rescan reuses the same directories.
+    let scan_dirs = crate::core::path_utils::resolve_dirs(&extra_dirs);
+    let apps = scan_apps(&scan_dirs);
 
     let ui = LauncherWindow::new().unwrap();
     let weak = ui.as_weak();
@@ -248,6 +343,10 @@ pub fn run() {
         ui.as_weak(),
         image_cache.clone(),
     ));
+    // Summoning the panel kicks off a background rescan, so apps added while the
+    // daemon runs are picked up without a restart.
+    let rescanner = Rescanner::spawn(search.index(), scan_dirs);
+
     // One persistent model is set once; every later result is merged in place so
     // the on-screen rows are reused instead of rebuilt (see `sync_model_in_place`).
     let items_model = Rc::new(VecModel::default());
@@ -303,10 +402,11 @@ pub fn run() {
 
     GlobalHotKeyEvent::set_event_handler(Some({
         let weak = weak.clone();
+        let rescanner = rescanner.clone();
         move |event: global_hotkey::GlobalHotKeyEvent| {
             if event.state == HotKeyState::Pressed {
                 if let Some(ui) = weak.upgrade() {
-                    show_and_focus(&ui);
+                    show_launcher(&ui, &rescanner);
                 }
             }
         }
@@ -332,11 +432,12 @@ pub fn run() {
     {
         let weak = weak.clone();
         let quitting = quitting.clone();
+        let rescanner = rescanner.clone();
         muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
             match event.id().0.as_str() {
                 "show" => {
                     if let Some(ui) = weak.upgrade() {
-                        show_and_focus(&ui);
+                        show_launcher(&ui, &rescanner);
                     }
                 }
                 "quit" => {
@@ -351,6 +452,7 @@ pub fn run() {
     // Left-click the tray icon also summons the launcher.
     tray_icon::TrayIconEvent::set_event_handler(Some({
         let weak = weak.clone();
+        let rescanner = rescanner.clone();
         move |event| {
             if let tray_icon::TrayIconEvent::Click {
                 button: tray_icon::MouseButton::Left,
@@ -359,7 +461,7 @@ pub fn run() {
             } = event
             {
                 if let Some(ui) = weak.upgrade() {
-                    show_and_focus(&ui);
+                    show_launcher(&ui, &rescanner);
                 }
             }
         }
