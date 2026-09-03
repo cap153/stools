@@ -110,6 +110,34 @@ The launcher runs in the background after start:
 - The directories in `config.toml`'s `path` are scanned for executables the same
   way they are on Linux, and rank below Start Menu entries.
 
+## System action shortcuts (`extras/`)
+
+stools has no plugin system by design. A clean way to add one-tap system actions
+(power off, reboot, empty trash, …) is to drop ready-made shortcuts into the
+directories stools already scans. The `extras/` folder ships a small set of
+examples — copy them in and they show up in search immediately.
+
+- **Linux** — copy the `.desktop` files into `~/.local/share/applications/`:
+  ```sh
+  cp extras/linux/*.desktop ~/.local/share/applications/
+  ```
+  They use standard Freedesktop icons and silent (`Terminal=false`) execs, and
+  carry a bilingual `Name` (`Name[zh_CN]`). stools derives pinyin from the
+  displayed name, so on a Chinese system you can search `关机` / `gj`, while an
+  English-locale session shows `Power Off` and matches `poweroff`. A `Keywords`
+  field (pinyin + English) is included for desktop-environment search too.
+
+- **Windows** — right-click **Run with PowerShell** on
+  `extras/windows/install_shortcuts.ps1` (or
+  `powershell -ExecutionPolicy Bypass -File extras/windows/install_shortcuts.ps1`).
+  It creates shortcuts in the Start Menu's `stools Commands` folder, each with a
+  native `shell32.dll` icon and a bilingual name (`关机 (Power Off).lnk`, …), so
+  both `关机` and `poweroff` match.
+
+After copying, just summon stools and search — no restart needed (the index
+refreshes in the background). Edit the files to taste (e.g. swap `systemctl
+poweroff` for your session's preferred command).
+
 ## Configuration
 
 Everything (search paths, keybindings, theme) is configured in a single
@@ -205,6 +233,9 @@ mono font, say — are resolved through the system font fallback.
 ```
 build.rs            # compiles the .slint UI
 ui/launcher.slint   # Fuzzel-style UI definition
+extras/
+  linux/            # example .desktop system actions (power off, reboot, trash, lock)
+  windows/          # install_shortcuts.ps1 generating system .lnk shortcuts
 src/
   main.rs           # platform entry dispatch
   launcher.rs       # shared Slint model helpers

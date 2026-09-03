@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Empty Trash
+Name[zh_CN]=清空回收站
+Comment=Permanently delete all items in the trash
+Comment[zh_CN]=永久清空所有回收站废纸篓项目
+Keywords=trash;empty;clear;qkhsz;
+Keywords[zh_CN]=清空回收站;清空废纸篓;qkhsz;
+Exec=gio trash --empty
+Icon=user-trash
+Terminal=false
+Categories=System;

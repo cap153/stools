@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Open Trash
+Name[zh_CN]=打开回收站
+Comment=Open the trash folder
+Comment[zh_CN]=在默认文件管理器中打开废纸篓
+Keywords=trash;open;dkhsz;
+Keywords[zh_CN]=打开回收站;废纸篓;dkhsz;
+Exec=gio open trash:///
+Icon=user-trash-full
+Terminal=false
+Categories=System;

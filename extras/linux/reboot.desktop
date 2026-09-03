@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Reboot
+Name[zh_CN]=重启
+Comment=Restart the system
+Comment[zh_CN]=重新启动计算机
+Keywords=reboot;restart;cq;
+Keywords[zh_CN]=重启;重新启动;cq;
+Exec=systemctl reboot
+Icon=system-reboot
+Terminal=false
+Categories=System;

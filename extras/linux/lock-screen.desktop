@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Lock Screen
+Name[zh_CN]=锁定屏幕
+Comment=Lock the current session
+Comment[zh_CN]=锁定当前桌面会话
+Keywords=lock;lockscreen;sdsp;
+Keywords[zh_CN]=锁定屏幕;锁屏;sdsp;
+Exec=loginctl lock-session
+Icon=system-lock-screen
+Terminal=false
+Categories=System;

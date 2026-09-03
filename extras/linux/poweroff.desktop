@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Power Off
+Name[zh_CN]=关机
+Comment=Shut down the system
+Comment[zh_CN]=关闭计算机系统
+Keywords=poweroff;shutdown;gj;
+Keywords[zh_CN]=关机;关闭;gj;
+Exec=systemctl poweroff
+Icon=system-shutdown
+Terminal=false
+Categories=System;
