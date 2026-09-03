@@ -75,6 +75,33 @@ pub fn resolve_font_family(families: &[String]) -> Option<String> {
     Some(first)
 }
 
+/// Parse a duration literal such as `"8s"`, `"6500ms"` or `"8"`.
+///
+/// Anything unparsable falls back to [`DEFAULT_MARQUEE_DURATION`], and the value
+/// is clamped to 1s..60s: faster than that is unreadable, slower is pointless.
+pub fn parse_duration(raw: &str) -> std::time::Duration {
+    const MIN_MS: u128 = 1_000;
+    const MAX_MS: u128 = 60_000;
+
+    let text = raw.trim().to_ascii_lowercase();
+    let millis = if let Some(value) = text.strip_suffix("ms") {
+        value.trim().parse::<f64>().ok().map(|ms| ms as u128)
+    } else {
+        text.strip_suffix('s')
+            .unwrap_or(&text)
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(|s| (s * 1000.0) as u128)
+    };
+
+    let clamped = millis
+        .filter(|ms| *ms > 0)
+        .map(|ms| ms.clamp(MIN_MS, MAX_MS))
+        .unwrap_or(8_000);
+    std::time::Duration::from_millis(clamped as u64)
+}
+
 /// Push the configured colours and font onto the window.
 pub fn apply_theme(ui: &LauncherWindow, theme: &ThemeConfig) {
     ui.set_theme_bg(parse_fuzzel_color(&theme.background, ui.get_theme_bg()));
@@ -94,6 +121,8 @@ pub fn apply_theme(ui: &LauncherWindow, theme: &ThemeConfig) {
         ui.get_theme_selection_text(),
     ));
     ui.set_theme_border(parse_fuzzel_color(&theme.border, ui.get_theme_border()));
+    // Slint's `duration` is milliseconds on the Rust side.
+    ui.set_theme_marquee_duration(parse_duration(&theme.marquee_duration).as_millis() as i64);
 
     if let Some(family) = resolve_font_family(&theme.font) {
         if std::env::var("STOOLS_DEBUG").is_ok() {
@@ -150,6 +179,23 @@ mod tests {
                 "input {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn parses_durations() {
+        let secs = |d: std::time::Duration| d;
+        assert_eq!(parse_duration("8s"), secs(std::time::Duration::from_secs(8)));
+        assert_eq!(parse_duration("12"), secs(std::time::Duration::from_secs(12)));
+        assert_eq!(
+            parse_duration("6500ms"),
+            secs(std::time::Duration::from_millis(6500))
+        );
+        // Clamped, not rejected.
+        assert_eq!(parse_duration("0.1s"), secs(std::time::Duration::from_secs(1)));
+        assert_eq!(parse_duration("120s"), secs(std::time::Duration::from_secs(60)));
+        // Garbage falls back to the default.
+        assert_eq!(parse_duration(""), secs(std::time::Duration::from_secs(8)));
+        assert_eq!(parse_duration("soon"), secs(std::time::Duration::from_secs(8)));
     }
 
     #[test]

@@ -18,6 +18,19 @@ pub fn prettify_path(path: &Path) -> String {
     s.into_owned()
 }
 
+/// Prettified path of the **directory containing** `path`.
+///
+/// The file name is dropped: the row already shows it as the title, so repeating
+/// it in the subtitle wastes the half of the row that is meant to say where the
+/// entry came from.
+pub fn prettify_dir(path: &Path) -> String {
+    match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => prettify_path(parent),
+        // A bare file name has no parent to show; keep what we have.
+        _ => prettify_path(path),
+    }
+}
+
 /// Default directories to scan for executables when no CLI args are given.
 /// These cover the most common locations across Arch / Fedora / Ubuntu / NixOS
 /// user setups. The user can always override or extend via the config file or
@@ -112,6 +125,20 @@ mod tests {
     #[test]
     fn leaves_system_path_alone() {
         assert_eq!(prettify_path(Path::new("/usr/bin/ls")), "/usr/bin/ls");
+    }
+
+    #[test]
+    fn prettify_dir_drops_the_file_name() {
+        assert_eq!(prettify_dir(Path::new("/usr/bin/ls")), "/usr/bin");
+        assert_eq!(prettify_dir(Path::new("/opt/app/foo.desktop")), "/opt/app");
+        if let Ok(home) = std::env::var("HOME") {
+            assert_eq!(
+                prettify_dir(PathBuf::from(&home).join(".cargo/bin/rg").as_path()),
+                "~/.cargo/bin"
+            );
+        }
+        // Nothing to strip: keep the path as-is.
+        assert_eq!(prettify_dir(Path::new("just-a-name")), "just-a-name");
     }
 
     #[test]

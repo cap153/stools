@@ -278,8 +278,26 @@ impl KeybindingMap {
     ];
 
     pub fn from_config(sections: &HashMap<String, HashMap<String, String>>) -> Self {
+        // A user-written "stools" binding must replace the built-in Alt+A
+        // outright. Leaving both in the table would keep the default: the two are
+        // separate entries, and `summon_binding` picks the smallest one — which
+        // Alt+A always is, since `alt` sorts before `ctrl`/`shift`/`meta`.
+        let stools_bindings = sections
+            .values()
+            .flat_map(|keys| keys.values())
+            .filter(|action| KeyAction::parse(action) == Some(KeyAction::Stools))
+            .count();
+        let user_has_stools = stools_bindings > 0;
+        if stools_bindings > 1 {
+            eprintln!(
+                "[stools] {stools_bindings} keys are bound to \"stools\"; only one can be the \
+                 summon hotkey (the first one in sort order wins)"
+            );
+        }
+
         let mut bindings: HashMap<(ModifiersMask, String), KeyAction> = Self::DEFAULTS
             .iter()
+            .filter(|(_, _, action)| *action != KeyAction::Stools || !user_has_stools)
             .map(|(mask, key, action)| ((*mask, (*key).to_string()), *action))
             .collect();
 
@@ -447,6 +465,25 @@ mod tests {
         assert_eq!(mask, ModifiersMask::new(false, true, false, false));
         assert_eq!(key, "a");
         assert_eq!(hotkey_code_name(&key).as_deref(), Some("KeyA"));
+    }
+
+    #[test]
+    fn user_stools_binding_replaces_the_default() {
+        // Alt+Space is the only "stools" binding: Alt+A must be gone, otherwise
+        // the summon hotkey would stay stuck on the default.
+        let map = KeybindingMap::from_config(&config("alt", "space", "stools"));
+        assert_eq!(
+            map.summon_binding(),
+            Some((ModifiersMask::new(false, true, false, false), "space".into()))
+        );
+        assert_eq!(map.resolve_event("a", false, true, false, false), None);
+
+        // Same story when the user moves it onto another modifier.
+        let map = KeybindingMap::from_config(&config("ctrl", "space", "stools"));
+        assert_eq!(
+            map.summon_binding(),
+            Some((ModifiersMask::new(true, false, false, false), "space".into()))
+        );
     }
 
     #[test]

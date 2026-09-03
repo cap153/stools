@@ -30,6 +30,8 @@ export component LauncherWindow inherits Window {
     in-out property <color> theme_selection_text: #f8f8f2ff;
     in-out property <color> theme_border: #bd93f9ff;
     in-out property <string> theme_font: "JetBrains Mono";
+    /// One full marquee cycle; longer means a slower, calmer scroll.
+    in-out property <duration> theme_marquee_duration: 8s;
 
     in-out property <[AppItem]> items: [];
     in-out property <int> selected_index: 0;
@@ -46,9 +48,6 @@ export component LauncherWindow inherits Window {
     private property <length> item_spacing: 2px;
     private property <length> row_total_height: item_height + item_spacing;
     private property <length> list_view_height: 500px;
-
-    // Marquee tuneables. marquee_gap is the empty space left behind the leading
-    // text before the trailing duplicate begins (seamless ribbon loop).
 
     public function select_next() {
         if (root.items.length > 0) {
@@ -190,7 +189,9 @@ export component LauncherWindow inherits Window {
                         }
                     }
 
-                    // Text row: name fills the left, subtitle sits at the right edge.
+                    // Text row: when a path is shown, name and path split the row
+                    // in half so neither can squeeze the other out; otherwise the
+                    // name gets the whole row. Either side scrolls on its own.
                     HorizontalLayout {
                         x: 36px;
                         y: 0px;
@@ -203,45 +204,84 @@ export component LauncherWindow inherits Window {
                         // `alignment: start` is required: the default is
                         // `stretch`, which would split the row evenly between
                         // each span and leave large gaps (e.g. "qu" / "te…").
-                        HorizontalLayout {
-                            horizontal-stretch: 1;
-                            alignment: start;
-                            spacing: 0px;
+                        name_box := Rectangle {
+                            width: item.subtitle != "" ? (parent.width - 12px) / 2 : parent.width;
+                            height: parent.height;
+                            clip: true;
 
-                            for span in item.spans : Text {
-                                text: span.text;
-                                color: span.is_match
-                                    ? (root.selected_index == index ? root.theme_selection_match : root.theme_match)
-                                    : (root.selected_index == index ? root.theme_selection_text : root.theme_text);
-                                font-size: 14.5px;
-                                font-weight: span.is_match ? 700 : 400;
-                                vertical-alignment: center;
+                            // Seamless dual-ribbon marquee driven by the wall clock, not
+                            // by a state transition: `animate` is disabled when a row is
+                            // created in its final selected state, but animation-tick()
+                            // always runs, so an overlong first hit scrolls from frame one.
+                            property <length> marquee_gap: 32px;
+                            property <length> loop_dist: name_track.preferred-width + self.marquee_gap;
+                            property <bool> is_overflow: name_track.preferred-width > self.width;
+                            property <bool> active: root.selected_index == index && self.is_overflow;
+
+                            // Time axis: a linear 0..1 progress looping every cycle.
+                            property <float> progress: Math.mod(animation-tick(), root.theme_marquee_duration) / root.theme_marquee_duration;
+                            property <length> scroll_offset: -self.progress * self.loop_dist;
+
+                            // Leading copy.
+                            name_track := HorizontalLayout {
+                                x: name_box.active ? name_box.scroll_offset : 0px;
+                                height: parent.height;
+                                alignment: start;
+                                spacing: 0px;
+
+                                for span in item.spans : Text {
+                                    text: span.text;
+                                    color: span.is_match
+                                        ? (root.selected_index == index ? root.theme_selection_match : root.theme_match)
+                                        : (root.selected_index == index ? root.theme_selection_text : root.theme_text);
+                                    font-size: 14.5px;
+                                    font-weight: span.is_match ? 700 : 400;
+                                    vertical-alignment: center;
+                                }
+                            }
+
+                            // Trailing copy sits exactly loop_dist behind the lead,
+                            // completing the loop; only rendered while active.
+                            if name_box.active : HorizontalLayout {
+                                x: name_track.x + name_box.loop_dist;
+                                height: parent.height;
+                                alignment: start;
+                                spacing: 0px;
+
+                                for span in item.spans : Text {
+                                    text: span.text;
+                                    color: span.is_match
+                                        ? (root.selected_index == index ? root.theme_selection_match : root.theme_match)
+                                        : (root.selected_index == index ? root.theme_selection_text : root.theme_text);
+                                    font-size: 14.5px;
+                                    font-weight: span.is_match ? 700 : 400;
+                                    vertical-alignment: center;
+                                }
                             }
                         }
 
                         if item.subtitle != "" : subtitle_box := Rectangle {
-                            width: min(210px, sub1.preferred-width);
+                            width: (parent.width - 12px) / 2;
                             height: parent.height;
                             clip: true;
 
-                            // Seamless dual-text ribbon driven by the wall clock, not by
-                            // a state transition: `animate` is disabled when a row is
-                            // created in its final selected state, but animation-tick()
-                            // always runs, so an overlong first hit scrolls from frame one.
-                            // Base ribbon constants.
                             property <length> marquee_gap: 32px;
                             property <length> loop_dist: sub1.preferred-width + self.marquee_gap;
                             property <bool> is_overflow: sub1.preferred-width > self.width;
                             property <bool> active: root.selected_index == index && self.is_overflow;
 
-                            // Time axis: a linear 0..1 progress that loops every loop_duration.
-                            property <duration> loop_duration: 6s;
-                            property <float> progress: Math.mod(animation-tick(), self.loop_duration) / self.loop_duration;
-                            // Leading text moves from 0 leftward down to -loop_dist, then wraps
-                            // invisibly thanks to the trailing copy.
+                            // Progress is shared with the name ribbon (same cycle),
+                            // but each box has its own distance, so the two sides
+                            // scroll at the pace that suits their text length.
+                            property <float> progress: Math.mod(animation-tick(), root.theme_marquee_duration) / root.theme_marquee_duration;
                             property <length> scroll_offset: -self.progress * self.loop_dist;
 
-                            // Leading copy.
+                            // Leading copy. While idle it is pushed to the right
+                            // edge of its half, so the path hugs the window's
+                            // right side (and an overflowing path shows its tail,
+                            // which is where the file name is). While scrolling
+                            // it starts from the left instead, so the ribbon reads
+                            // in natural order.
                             sub1 := Text {
                                 text: item.subtitle;
                                 color: #6272a4;
@@ -249,7 +289,9 @@ export component LauncherWindow inherits Window {
                                 height: 100%;
                                 vertical-alignment: center;
 
-                                x: subtitle_box.active ? subtitle_box.scroll_offset : 0px;
+                                x: subtitle_box.active
+                                    ? subtitle_box.scroll_offset
+                                    : subtitle_box.width - self.preferred-width;
                             }
 
                             // Trailing copy sits exactly loop_dist behind the lead, completing

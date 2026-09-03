@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -89,6 +90,29 @@ fn walk_dir_inner(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
 /// files (Steam drops one on the desktop per game, and they are not `.lnk`).
 const APP_EXTENSIONS: &[&str] = &["lnk", "exe", "bat", "cmd", "com", "ps1", "msc", "url"];
 
+/// Extensions that are kept in the displayed name: a bare `rufus` says nothing,
+/// while `rufus.exe` makes it obvious that this is a portable binary rather than
+/// a shortcut to an installed program.
+const NAMED_EXTENSIONS: &[&str] = &["exe", "bat", "cmd", "com", "ps1", "msc"];
+
+/// Display name for a scanned file. Shortcuts (`.lnk`, `.url`) drop their
+/// extension — the shell never shows it either — but standalone binaries and
+/// scripts keep it.
+fn display_name(path: &Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    let name = if NAMED_EXTENSIONS.contains(&ext.as_str()) {
+        path.file_name()
+    } else {
+        path.file_stem()
+    };
+    name.and_then(|s| s.to_str()).map(str::to_string)
+}
+
 fn is_launchable_app(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -112,19 +136,19 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
             if !is_launchable_app(&path) {
                 continue;
             }
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            let Some(name) = display_name(&path) else {
                 continue;
             };
-            if stem.is_empty() || stem.starts_with('.') {
+            if name.is_empty() || name.starts_with('.') {
                 continue;
             }
             if !seen.insert(path.to_string_lossy().to_lowercase()) {
                 continue;
             }
-            let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(stem);
+            let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&name);
             entries.push(AppEntry {
                 id: format!("bin:{}", path.to_string_lossy()),
-                name: stem.to_string(),
+                name,
                 exec: path.to_string_lossy().into_owned(),
                 // Icons of the extra directories' binaries come from the .exe
                 // itself, extracted through the shell.
@@ -159,12 +183,10 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
         if !is_launchable_app(&path) {
             continue;
         }
-        let stem = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        if stem.is_empty() {
+        let Some(name) = display_name(&path) else {
+            continue;
+        };
+        if name.is_empty() {
             continue;
         }
         // A shortcut frequently exists in both the personal and the common
@@ -173,10 +195,10 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
         if !seen_paths.insert(path_str.to_lowercase()) {
             continue;
         }
-        let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&stem);
+        let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&name);
         entries.push(AppEntry {
             id: path_str.clone(),
-            name: stem,
+            name,
             // Kept as the shortcut's own path; ShellExecute (open crate) resolves
             // `.lnk`, `.url` and `.exe` alike.
             exec: path_str.clone(),
@@ -208,7 +230,8 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
             .copied()
             .unwrap_or(0)
             > 1)
-        .then(|| crate::core::path_utils::prettify_path(Path::new(&e.exec)));
+        // The row title already carries the file name, so only the folder is shown.
+        .then(|| crate::core::path_utils::prettify_dir(Path::new(&e.exec)));
     }
 
     entries
@@ -251,21 +274,28 @@ struct Rescanner {
     // `Arc` so the handle can be shared with the (Send-only) hotkey and menu
     // handlers; `Mutex` because a `Sender` is not `Sync` on its own.
     tx: Arc<Mutex<std::sync::mpsc::Sender<()>>>,
+    // Directories to scan — swapped out when the config is reloaded.
+    dirs: Arc<RwLock<Vec<PathBuf>>>,
 }
 
 impl Rescanner {
-    fn spawn(index: AppIndex, dirs: Vec<PathBuf>) -> Self {
+    fn spawn(index: AppIndex, initial_dirs: Vec<PathBuf>) -> Self {
         let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let dirs = Arc::new(RwLock::new(initial_dirs));
+        let dirs_w = dirs.clone();
+
         thread::spawn(move || {
             // Ends when the last `Rescanner` clone (and thus the sender) is dropped.
             while rx.recv().is_ok() {
                 // Collapse a burst of summons into a single scan.
                 while rx.try_recv().is_ok() {}
-                index.replace_if_changed(scan_apps(&dirs));
+                let current = dirs_w.read().map(|d| d.clone()).unwrap_or_default();
+                index.replace_if_changed(scan_apps(&current));
             }
         });
         Self {
             tx: Arc::new(Mutex::new(tx)),
+            dirs,
         }
     }
 
@@ -274,6 +304,15 @@ impl Rescanner {
         if let Ok(tx) = self.tx.lock() {
             let _ = tx.send(());
         }
+    }
+
+    /// Point the scanner at a new set of directories and rescan immediately, so a
+    /// config reload picks up added/removed `path` entries without a restart.
+    fn set_dirs(&self, new_dirs: Vec<PathBuf>) {
+        if let Ok(mut guard) = self.dirs.write() {
+            *guard = new_dirs;
+        }
+        self.request();
     }
 }
 
@@ -302,12 +341,130 @@ fn build_hotkey(mask: crate::core::keybind::ModifiersMask, key: &str) -> Option<
     Some(HotKey::new((!mods.is_empty()).then_some(mods), code))
 }
 
+/// The global summon hotkey, owned by the thread that registered it.
+///
+/// `GlobalHotKeyManager` holds a Win32 window handle, so it is neither `Send` nor
+/// `Sync` and cannot be captured by the tray menu handler (which must be both).
+/// Menu events are delivered on the UI thread — the same thread the manager is
+/// created on — so a `thread_local` reaches it from the handler without any
+/// unsynchronised sharing.
+struct SummonHotKey {
+    manager: GlobalHotKeyManager,
+    registered: Option<HotKey>,
+}
+
+thread_local! {
+    static SUMMON_HOTKEY: RefCell<Option<SummonHotKey>> = const { RefCell::new(None) };
+}
+
+impl SummonHotKey {
+    /// Create the manager and register the initial binding.
+    fn init(binding: Option<(crate::core::keybind::ModifiersMask, String)>) {
+        let manager = match GlobalHotKeyManager::new() {
+            Ok(manager) => manager,
+            Err(err) => {
+                eprintln!("[stools] failed to init hotkey manager: {err}");
+                return;
+            }
+        };
+        let mut state = Self {
+            manager,
+            registered: None,
+        };
+        match binding.and_then(|(mask, key)| build_hotkey(mask, &key)) {
+            Some(hotkey) => state.register(hotkey),
+            None => eprintln!("[stools] no global hotkey bound to the \"stools\" action"),
+        }
+        SUMMON_HOTKEY.set(Some(state));
+    }
+
+    /// Apply the binding from a freshly read config. An unchanged binding leaves
+    /// the current registration alone, and releasing/succeeding failures are
+    /// reported rather than silently swallowed.
+    fn apply(hotkey: Option<HotKey>) {
+        SUMMON_HOTKEY.with(|cell| {
+            let mut borrow = cell.borrow_mut();
+            let Some(state) = borrow.as_mut() else {
+                // Should not happen: menu events arrive on the UI thread, which is
+                // where `init` ran. Say so rather than silently ignoring it.
+                eprintln!("[stools] hotkey manager is not on this thread; binding not applied");
+                return;
+            };
+            if state.registered == hotkey {
+                return;
+            }
+            if let Some(old) = state.registered.take() {
+                if let Err(err) = state.manager.unregister(old) {
+                    eprintln!("[stools] failed to unregister global hotkey {old:?}: {err}");
+                }
+            }
+            if let Some(hotkey) = hotkey {
+                state.register(hotkey);
+            }
+        });
+    }
+
+    fn register(&mut self, hotkey: HotKey) {
+        match self.manager.register(hotkey) {
+            Ok(()) => self.registered = Some(hotkey),
+            Err(err) => eprintln!("[stools] failed to register global hotkey {hotkey:?}: {err}"),
+        }
+    }
+
+    /// Drop the manager, which destroys its hidden window and frees the key.
+    fn shutdown() {
+        SUMMON_HOTKEY.with(|cell| {
+            cell.borrow_mut().take();
+        });
+    }
+}
+
+/// Re-read `config.toml` and apply everything that can change at runtime: the
+/// theme (colours and font), the in-window keybindings, the global summon hotkey
+/// and the scanned directories.
+fn reload_config(
+    ui: &slint::Weak<LauncherWindow>,
+    rescanner: &Rescanner,
+    keybindings: &Arc<RwLock<KeybindingMap>>,
+    cli_dirs: &[String],
+) {
+    let config = Config::load_or_create();
+    if let Some(ui) = ui.upgrade() {
+        theme::apply_theme(&ui, &config.theme);
+    }
+
+    // Replace the in-window bindings, then read the summon binding back out of
+    // the same map so both views of the config can never disagree.
+    if let Ok(mut map) = keybindings.write() {
+        *map = KeybindingMap::from_config(&config.keybindings);
+    }
+    let summon = keybindings.read().ok().and_then(|map| map.summon_binding());
+    SummonHotKey::apply(summon.and_then(|(mask, key)| build_hotkey(mask, &key)));
+
+    let mut extra_dirs = config.path.clone();
+    extra_dirs.extend(cli_dirs.iter().cloned());
+    rescanner.set_dirs(crate::core::path_utils::resolve_dirs(&extra_dirs));
+}
+
+/// Open the folder holding `config.toml` in Explorer (creating it if needed), so
+/// the file can be edited without hunting for the AppData path.
+fn open_config_folder() {
+    let config_path = Config::config_path();
+    let Some(folder) = config_path.parent() else {
+        return;
+    };
+    let _ = std::fs::create_dir_all(folder);
+    let _ = open::that_detached(folder);
+}
+
 /// The Windows daemon: lives in the tray, registers a global hotkey and toggles
 /// the launcher window between hidden and shown.
 pub fn run() {
     let config = Config::load_or_create();
+    // Kept so a config reload can rebuild the directory list the same way.
+    let cli_dirs: Vec<String> = std::env::args().skip(1).collect();
     let mut extra_dirs = config.path.clone();
-    extra_dirs.extend(std::env::args().skip(1));
+    extra_dirs.extend(cli_dirs.iter().cloned());
     // Resolved once and kept: the background rescan reuses the same directories.
     let scan_dirs = crate::core::path_utils::resolve_dirs(&extra_dirs);
     let apps = scan_apps(&scan_dirs);
@@ -317,15 +474,22 @@ pub fn run() {
 
     theme::apply_theme(&ui, &config.theme);
 
-    let keybindings = KeybindingMap::from_config(&config.keybindings);
-    let summon = keybindings.summon_binding();
-    ui.on_resolve_key(move |text, ctrl, alt, shift, meta| {
-        keybindings
-            .resolve_event(&text, ctrl, alt, shift, meta)
-            .map(|action| action.as_str())
-            .unwrap_or_default()
-            .into()
-    });
+    // Shared (not `Rc`) because the tray menu handler that replaces it on a
+    // config reload has to be `Send + Sync`.
+    let keybindings = Arc::new(RwLock::new(KeybindingMap::from_config(&config.keybindings)));
+    let summon = keybindings.read().ok().and_then(|map| map.summon_binding());
+    {
+        let keybindings = keybindings.clone();
+        ui.on_resolve_key(move |text, ctrl, alt, shift, meta| {
+            keybindings
+                .read()
+                .ok()
+                .and_then(|map| map.resolve_event(&text, ctrl, alt, shift, meta))
+                .map(|action| action.as_str())
+                .unwrap_or_default()
+                .into()
+        });
+    }
 
     let image_cache = crate::launcher::AppImageCache::new();
     // Keep the (non-`Send`) icon cache on the UI thread so the search worker's
@@ -391,14 +555,7 @@ pub fn run() {
 
     // ---- Global hotkey: whatever the config binds to "stools" ---------------
     // (default Alt+A; the window can still be summoned from the tray icon).
-    let hotkey_manager = GlobalHotKeyManager::new().expect("failed to init hotkey manager");
-    if let Some(hotkey) = summon.and_then(|(mask, key)| build_hotkey(mask, &key)) {
-        if let Err(err) = hotkey_manager.register(hotkey) {
-            eprintln!("[stools] failed to register global hotkey {hotkey:?}: {err}");
-        }
-    } else {
-        eprintln!("[stools] no global hotkey bound to the \"stools\" action");
-    }
+    SummonHotKey::init(summon);
 
     GlobalHotKeyEvent::set_event_handler(Some({
         let weak = weak.clone();
@@ -417,8 +574,16 @@ pub fn run() {
 
     let menu = muda::Menu::new();
     let show_item = muda::MenuItem::with_id("show", "Show", true, None);
+    let reload_item = muda::MenuItem::with_id("reload_config", "Reload config", true, None);
+    let folder_item =
+        muda::MenuItem::with_id("show_config_folder", "Show config folder", true, None);
     let quit_item = muda::MenuItem::with_id("quit", "Quit", true, None);
+
     let _ = menu.append(&show_item);
+    let _ = menu.append(&muda::PredefinedMenuItem::separator());
+    let _ = menu.append(&reload_item);
+    let _ = menu.append(&folder_item);
+    let _ = menu.append(&muda::PredefinedMenuItem::separator());
     let _ = menu.append(&quit_item);
 
     let tray = tray_icon::TrayIconBuilder::new()
@@ -433,6 +598,7 @@ pub fn run() {
         let weak = weak.clone();
         let quitting = quitting.clone();
         let rescanner = rescanner.clone();
+        let keybindings = keybindings.clone();
         muda::MenuEvent::set_event_handler(Some(move |event: muda::MenuEvent| {
             match event.id().0.as_str() {
                 "show" => {
@@ -440,6 +606,10 @@ pub fn run() {
                         show_launcher(&ui, &rescanner);
                     }
                 }
+                "reload_config" => {
+                    reload_config(&weak, &rescanner, &keybindings, &cli_dirs);
+                }
+                "show_config_folder" => open_config_folder(),
                 "quit" => {
                     quitting.store(true, Ordering::SeqCst);
                     let _ = slint::quit_event_loop();
@@ -480,6 +650,6 @@ pub fn run() {
     muda::MenuEvent::set_event_handler(None::<fn(_) -> _>);
     tray_icon::TrayIconEvent::set_event_handler(None::<fn(_) -> _>);
     drop(tray);
-    drop(hotkey_manager);
+    SummonHotKey::shutdown();
     let _ = quitting;
 }

@@ -374,7 +374,9 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
                 // Desktop apps: the .desktop file path (kept in `id`).
                 EntryKind::Desktop => Path::new(&e.id),
             };
-            e.subtitle = Some(path_utils::prettify_path(origin));
+            // The row title already carries the file name, so only the folder is
+            // shown — that is what tells two same-named entries apart.
+            e.subtitle = Some(path_utils::prettify_dir(origin));
         } else {
             e.subtitle = None;
         }

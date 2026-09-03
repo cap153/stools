@@ -81,8 +81,22 @@ pub struct ThemeConfig {
     #[serde(rename = "selection-text", alias = "selection_text")]
     pub selection_text: String,
     pub border: String,
+    /// Duration of one full marquee cycle for overlong names/paths ("8s").
+    #[serde(
+        rename = "marquee-duration",
+        alias = "marquee_duration",
+        default = "default_marquee_duration"
+    )]
+    pub marquee_duration: String,
     /// Font families in priority order; the first one installed wins.
     pub font: Vec<String>,
+}
+
+/// See [`ThemeConfig::marquee_duration`].
+pub const DEFAULT_MARQUEE_DURATION: &str = "8s";
+
+fn default_marquee_duration() -> String {
+    DEFAULT_MARQUEE_DURATION.into()
 }
 
 impl Default for ThemeConfig {
@@ -97,6 +111,7 @@ impl Default for ThemeConfig {
             selection: "44475add".into(),
             selection_text: "f8f8f2ff".into(),
             border: "bd93f9ff".into(),
+            marquee_duration: DEFAULT_MARQUEE_DURATION.into(),
             font: vec!["JetBrains Mono".into()],
         }
     }
@@ -115,16 +130,26 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r##"# ================================
 
 # -----------------------------------------------------------------------------
 # Extra directories to search, in addition to the built-in ones
-# (~/.local/bin, ~/.cargo/bin, ~/.deno/bin, /usr/bin, /usr/local/bin, ...).
+# (Windows: both Start Menus and both desktops; Linux: ~/.local/share/applications,
+# /usr/share/applications, ~/.local/bin, /usr/bin, ...).
 # Executables are picked up everywhere; on Linux .desktop files placed in these
 # directories are indexed as well.
 #
-# "~", "$VAR", "${VAR}" and "%VAR%" are expanded. Directories that do not exist
-# are silently ignored.
+# "~" (including "~/..." and "~\..."), "$VAR", "${VAR}" and "%VAR%" are expanded.
+# Directories that do not exist are silently ignored.
+#
+# Windows note: inside "..." a backslash starts a TOML escape sequence, so
+# "C:\Users\me" is invalid TOML. Write Windows paths with single quotes, forward
+# slashes, or doubled backslashes — all three work:
+#     'C:\Users\me\Downloads'      "C:/Users/me/Downloads"      "C:\\Users\\me"
 # -----------------------------------------------------------------------------
 path = [
-    "$HOME/.cargo/bin",
-    "~/.deno/bin",
+#     "$HOME/.cargo/bin",
+#     "~/.deno/bin",
+#     '%APPDATA%\Microsoft\Windows\Start Menu\Programs',
+#     'C:\ProgramData\Microsoft\Windows\Start Menu\Programs',
+#     '~/Downloads',
+#     "C:/Tools",
 ]
 
 # -----------------------------------------------------------------------------
@@ -166,6 +191,8 @@ tab = "up"         # select the previous entry
 
 [keybindings.alt]
 a = "stools"       # summon the window (global hotkey on Windows)
+                   # only one binding may use "stools": change or delete this line
+                   # when you move the summon key elsewhere
 
 # [keybindings.ctrl]
 # u = "up"         # example: add ctrl+u to select the previous entry
@@ -188,6 +215,10 @@ selection-match = "8be9fdff"
 selection = "44475add"
 selection-text = "f8f8f2ff"
 border = "bd93f9ff"
+
+# How long one marquee cycle takes for a name/path that is too long to fit.
+# Bigger is slower: "8s" (default), "12s", "6500ms", … Clamped to 1s..60s.
+marquee-duration = "8s"
 
 # Font families in priority order: the first family installed on the system is
 # used, so a list can cover Latin and CJK setups at once. Glyphs missing from
@@ -225,14 +256,100 @@ impl Config {
         let Ok(text) = fs::read_to_string(&path) else {
             return Self::default();
         };
-        match toml::from_str(&text) {
-            Ok(cfg) => cfg,
+        match toml::from_str::<Self>(&text) {
+            Ok(cfg) => return cfg,
             Err(err) => {
+                // The classic way to break this file is a Windows path in double
+                // quotes (`"C:\Users\me"`): TOML reads `\U` as a Unicode escape.
+                // Retry once with those backslashes escaped instead of dropping a
+                // config that is otherwise perfectly valid.
+                if let Some(fixed) = escape_stray_backslashes(&text) {
+                    if let Ok(cfg) = toml::from_str::<Self>(&fixed) {
+                        eprintln!(
+                            "[stools] {}: read with escaped backslashes; prefer single quotes \
+                             ('C:\\Users\\me') or forward slashes (\"C:/Users/me\")",
+                            path.display()
+                        );
+                        return cfg;
+                    }
+                }
                 eprintln!("[stools] {}: {err}", path.display());
-                Self::default()
+                eprintln!(
+                    "[stools] falling back to the built-in defaults; fix the file, then use the \
+                     tray menu's \"Reload config\" to apply it"
+                );
             }
         }
+        Self::default()
     }
+}
+
+/// Double the backslashes inside double-quoted strings that do not start a valid
+/// TOML escape, turning `"C:\Users\me"` into a parsable `"C:\\Users\\me"`.
+///
+/// Returns `None` when there is nothing to fix, so a file that fails for any
+/// other reason is not rewritten (and its real error stays visible).
+fn escape_stray_backslashes(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    // Only "..." strings treat `\` specially; '...' literals and comments are
+    // copied verbatim so this never rewrites what the user meant.
+    let mut in_string = false;
+    let mut changed = false;
+
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                in_string = !in_string;
+                out.push(c);
+            }
+            '\'' if !in_string => {
+                out.push(c);
+                for c in chars.by_ref() {
+                    out.push(c);
+                    if c == '\'' {
+                        break;
+                    }
+                }
+            }
+            '#' if !in_string => {
+                out.push(c);
+                while let Some(&c) = chars.peek() {
+                    if c == '\n' {
+                        break;
+                    }
+                    out.push(c);
+                    chars.next();
+                }
+            }
+            '\\' if in_string => {
+                out.push('\\');
+                let next = chars.peek().copied();
+                match next {
+                    // A real escape sequence: leave it alone.
+                    Some('"' | '\\' | 'b' | 'f' | 'n' | 'r' | 't') => out.push(chars.next()?),
+                    Some('u') if hex_follows(&chars, 4) => out.push(chars.next()?),
+                    Some('U') if hex_follows(&chars, 8) => out.push(chars.next()?),
+                    // Anything else is a path separator mistaken for an escape.
+                    _ => {
+                        out.push('\\');
+                        changed = true;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+
+    changed.then_some(out)
+}
+
+/// Whether the `count` characters after the current one (which is `u`/`U`) are
+/// all hex digits, i.e. `\uXXXX` / `\UXXXXXXXX` really is a Unicode escape.
+fn hex_follows(chars: &std::iter::Peekable<std::str::Chars<'_>>, count: usize) -> bool {
+    let mut lookahead = chars.clone();
+    lookahead.next();
+    (0..count).all(|_| matches!(lookahead.next(), Some(c) if c.is_ascii_hexdigit()))
 }
 
 /// Expand `~`, `$VAR`, `${VAR}` and `%VAR%` in a configured path.
@@ -354,7 +471,9 @@ mod tests {
         assert_eq!(cfg.theme.selection, theme.selection);
         assert_eq!(cfg.theme.selection_text, theme.selection_text);
         assert_eq!(cfg.theme.border, theme.border);
-        assert!(!cfg.path.is_empty());
+        assert_eq!(cfg.theme.marquee_duration, theme.marquee_duration);
+        // Every sample path is commented out: scanning extra directories is opt-in.
+        assert!(cfg.path.is_empty());
         // [keybindings], [keybindings.shift] and [keybindings.alt]
         assert_eq!(cfg.keybindings.len(), 3);
         assert_eq!(cfg.keybindings[""]["esc"], "close");
@@ -382,6 +501,43 @@ mod tests {
             expand_path("${HOME}/.cargo/bin"),
             Some(home.join(".cargo/bin"))
         );
+    }
+
+    #[test]
+    fn expands_tilde_with_backslash() {
+        let home = dirs::home_dir().expect("home dir");
+        assert_eq!(expand_path("~\\.cargo\\bin"), Some(home.join(".cargo\\bin")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn expands_windows_env_vars() {
+        let appdata = std::env::var("APPDATA").expect("APPDATA");
+        assert_eq!(
+            expand_path("%APPDATA%\\stools"),
+            Some(PathBuf::from(appdata).join("stools"))
+        );
+    }
+
+    #[test]
+    fn recovers_windows_paths_written_in_double_quotes() {
+        // "C:\Users\me\Downloads" is not valid TOML (\U is an escape), but it is
+        // the obvious thing to write, so it is tolerated rather than rejected.
+        let text = "path = [\n    \"C:\\Users\\captain\\Downloads\",\n]\n";
+        assert!(toml::from_str::<Config>(text).is_err());
+
+        let fixed = escape_stray_backslashes(text).expect("stray backslashes detected");
+        let cfg: Config = toml::from_str(&fixed).expect("fixed text parses");
+        assert_eq!(cfg.path, vec![r"C:\Users\captain\Downloads".to_string()]);
+    }
+
+    #[test]
+    fn leaves_valid_escapes_and_other_text_alone() {
+        assert_eq!(escape_stray_backslashes("a = \"x\""), None);
+        assert_eq!(escape_stray_backslashes(r#"a = "tab\there""#), None);
+        assert_eq!(escape_stray_backslashes(r#"a = "é""#), None);
+        // A genuinely broken file has nothing to fix, so its error stays visible.
+        assert_eq!(escape_stray_backslashes("a = "), None);
     }
 
     #[test]
