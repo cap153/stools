@@ -38,4 +38,12 @@ pub struct AppEntry {
     /// when a query hits pinyin instead of the text itself.
     #[serde(default)]
     pub pinyin_indices: FieldIndices,
+    /// Whether this entry is a secondary-language alias of another `.desktop`
+    /// entry (generated when a `.desktop` carries both `Name` and `Name[zh_CN]`).
+    /// Aliases are hidden when the query is empty — so the first screen shows only
+    /// the primary (locale-appropriate) name — but they take part in search, so an
+    /// English query can hit the English name while a Chinese query hits the Chinese
+    /// one, each highlighted in its own script.
+    #[serde(default)]
+    pub is_alias: bool,
 }

@@ -183,16 +183,16 @@ fn parse_bool(v: Option<&str>, def: bool) -> bool {
     }
 }
 
-fn parse_desktop(path: &Path, _id: &str, icon_map: &HashMap<String, PathBuf>) -> Option<AppEntry> {
-    let content = fs::read_to_string(path).ok()?;
-    let mut name = None::<String>;
+fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEntry> {
+    let Ok(content) = fs::read_to_string(path) else { return Vec::new(); };
+    let mut default_name = None::<String>;
+    let mut zh_name = None::<String>;
     let mut exec = None::<String>;
     let mut icon = None::<String>;
     let mut hidden = false;
     let mut no_display = false;
     let mut is_application = false;
     let mut in_desktop = false;
-    let mut localized_names: Vec<String> = Vec::new();
 
     for raw_line in content.lines() {
         let line = raw_line.trim();
@@ -210,42 +210,88 @@ fn parse_desktop(path: &Path, _id: &str, icon_map: &HashMap<String, PathBuf>) ->
         let (key, value) = (line[..eq].trim(), line[eq + 1..].trim());
         match key {
             "Type" => is_application = value == "Application",
-            "Name" => name = Some(value.to_string()),
+            "Name" => default_name = Some(value.to_string()),
+            // Any Chinese locale name: Simplified (zh_CN / zh) and Traditional
+            // (zh_TW / zh_HK / …) — vendors sometimes ship only a subset.
+            k if k.starts_with("Name[zh") && k.ends_with(']') => {
+                zh_name = Some(value.to_string())
+            }
             "Exec" => exec = Some(value.to_string()),
             "Icon" => icon = Some(value.to_string()),
             "Hidden" => hidden = parse_bool(Some(value), false),
             "NoDisplay" => no_display = parse_bool(Some(value), false),
-            _ => {
-                if let Some(rest) = key.strip_prefix("Name[") {
-                    if rest.ends_with(']') {
-                        localized_names.push(value.to_string());
-                    }
-                }
-            }
+            _ => {}
         }
     }
 
     if !is_application {
-        return None;
+        return Vec::new();
     }
-    let name_str = localized_names.pop().or(name)?;
-    let exec_value = exec?;
-    let (pinyin_full, pinyin_abbr, pinyin_indices) = matcher::pinyin_fields(&name_str);
+    let Some(exec_value) = exec else { return Vec::new(); };
+    let Some(def_name) = default_name else { return Vec::new(); };
 
-    Some(AppEntry {
+    // Pick the primary name from the current locale, and keep the other language
+    // (when it differs) as a searchable alias. That way an English query hits the
+    // English name and a Chinese query hits the Chinese name, each highlighted in
+    // its own script. Aliases are filtered out of the empty-query list (see
+    // `matcher::rank`) so the first screen is not cluttered with twins.
+    let is_zh = crate::core::i18n::is_chinese_locale();
+    // Only generate an alias when the Chinese and English names genuinely differ —
+    // regardless of the current locale. Without the `zh != def_name` guard here a
+    // non-Chinese system with `Name=Firefox` / `Name[zh_CN]=Firefox` would emit two
+    // identical entries.
+    let (primary_name, secondary_name) = match &zh_name {
+        Some(zh) if zh != &def_name => {
+            if is_zh {
+                (zh.clone(), Some(def_name))
+            } else {
+                (def_name, Some(zh.clone()))
+            }
+        }
+        _ => (zh_name.unwrap_or(def_name), None),
+    };
+
+    let resolved_icon = icon.and_then(|i| resolve_icon(&i, icon_map));
+    let main_id = path.to_string_lossy().into_owned();
+    let mut result = Vec::with_capacity(2);
+
+    // 1. Primary entry (is_alias = false).
+    let (pf, pa, pi) = matcher::pinyin_fields(&primary_name);
+    result.push(AppEntry {
         // id is the .desktop file's real path so a later same-name collision can
         // show where this entry came from (used as the subtitle origin).
-        id: path.to_string_lossy().into_owned(),
-        name: name_str,
-        exec: exec_value,
-        icon_path: icon.and_then(|i| resolve_icon(&i, icon_map)),
+        id: main_id.clone(),
+        name: primary_name,
+        exec: exec_value.clone(),
+        icon_path: resolved_icon.clone(),
         hidden: hidden || no_display,
-        pinyin_full,
-        pinyin_abbr,
+        pinyin_full: pf,
+        pinyin_abbr: pa,
         kind: EntryKind::Desktop,
         subtitle: None,
-        pinyin_indices,
-    })
+        pinyin_indices: pi,
+        is_alias: false,
+    });
+
+    // 2. Secondary-language alias entry (is_alias = true) when the two names differ.
+    if let Some(sec_name) = secondary_name {
+        let (pf, pa, pi) = matcher::pinyin_fields(&sec_name);
+        result.push(AppEntry {
+            id: format!("{}:alias", main_id),
+            name: sec_name,
+            exec: exec_value,
+            icon_path: resolved_icon,
+            hidden: hidden || no_display,
+            pinyin_full: pf,
+            pinyin_abbr: pa,
+            kind: EntryKind::Desktop,
+            subtitle: None,
+            pinyin_indices: pi,
+            is_alias: true,
+        });
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------
@@ -305,6 +351,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 kind: EntryKind::Binary,
                 subtitle: None,
                 pinyin_indices,
+                is_alias: false,
             });
         }
     }
@@ -341,9 +388,7 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
             if !seen_ids.insert(unique_id) {
                 continue;
             }
-            if let Some(entry) = parse_desktop(&path, &id, &icon_map) {
-                entries.push(entry);
-            }
+            entries.extend(parse_desktop(&path, &icon_map));
         }
     }
 
@@ -439,6 +484,91 @@ fn launch_exec(exec: &str) {
     let Some(program) = parts.next() else { return };
     let args: Vec<&str> = parts.collect();
     let _ = Command::new(program).args(&args).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn write_desktop(dir: &std::path::Path, name: &str, zh: Option<&str>) -> std::path::PathBuf {
+        let p = dir.join("sample.desktop");
+        let mut c = format!(
+            "[Desktop Entry]\nType=Application\nName={name}\nExec=echo hi\nIcon=firefox\n"
+        );
+        if let Some(zh) = zh {
+            c.push_str(&format!("Name[zh_CN]={zh}\n"));
+        }
+        let mut f = std::fs::File::create(&p).unwrap();
+        f.write_all(c.as_bytes()).unwrap();
+        p
+    }
+
+    #[test]
+    fn zh_desktop_yields_english_alias_under_chinese_locale() {
+        let dir = std::env::temp_dir().join("stools_test_alias_zh");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = write_desktop(&dir, "Power Off", Some("关机"));
+
+        let old = std::env::var("LC_ALL").ok();
+        unsafe {
+            std::env::set_var("LC_ALL", "zh_CN.UTF-8");
+        }
+        let entries = parse_desktop(&p, &HashMap::new());
+        if let Some(o) = &old {
+            unsafe {
+                std::env::set_var("LC_ALL", o);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("LC_ALL");
+            }
+        }
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].name, "关机");
+        assert!(!entries[0].is_alias);
+        assert_eq!(entries[1].name, "Power Off");
+        assert!(entries[1].is_alias);
+    }
+
+    #[test]
+    fn alias_omitted_when_names_are_identical() {
+        let dir = std::env::temp_dir().join("stools_test_alias_same");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = write_desktop(&dir, "Firefox", Some("Firefox"));
+        let entries = parse_desktop(&p, &HashMap::new());
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_alias);
+    }
+
+    #[test]
+    fn identical_names_dont_duplicate_on_non_chinese_locale() {
+        // Regression: a non-Chinese session must not emit two identical entries
+        // just because Name and Name[zh_CN] share the same string.
+        let dir = std::env::temp_dir().join("stools_test_alias_nzh");
+        let _ = std::fs::create_dir_all(&dir);
+        let p = write_desktop(&dir, "Firefox", Some("Firefox"));
+
+        let old = std::env::var("LC_ALL").ok();
+        unsafe {
+            std::env::set_var("LC_ALL", "en_US.UTF-8");
+        }
+        let entries = parse_desktop(&p, &HashMap::new());
+        if let Some(o) = &old {
+            unsafe {
+                std::env::set_var("LC_ALL", o);
+            }
+        } else {
+            unsafe {
+                std::env::remove_var("LC_ALL");
+            }
+        }
+
+        assert_eq!(entries.len(), 1);
+        assert!(!entries[0].is_alias);
+        assert_eq!(entries[0].name, "Firefox");
+    }
 }
 
 // ---------------------------------------------------------------------------

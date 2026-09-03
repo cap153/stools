@@ -159,6 +159,7 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
                 kind: EntryKind::Binary,
                 subtitle: None,
                 pinyin_indices,
+                is_alias: false,
             });
         }
     }
@@ -212,6 +213,7 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
             kind: EntryKind::Desktop,
             subtitle: None,
             pinyin_indices,
+            is_alias: false,
         });
     }
 

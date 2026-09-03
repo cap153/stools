@@ -315,7 +315,12 @@ pub fn rank(
     if query.is_empty() {
         // Strict three-tier ordering: history (most recent first) → desktop apps
         // → binaries, preserving original (scan) order within each tier.
-        let mut idxs: Vec<usize> = (0..items.len()).collect();
+        // Alias entries (secondary-language `.desktop` names) are excluded so the
+        // first screen shows only the primary name, not "关机" and "Power Off" side
+        // by side. They still participate once a query is typed (below).
+        let mut idxs: Vec<usize> = (0..items.len())
+            .filter(|&i| !items[i].is_alias)
+            .collect();
         idxs.sort_by(|&a, &b| {
             let ea = &items[a];
             let eb = &items[b];
@@ -442,6 +447,7 @@ mod tests {
             kind: crate::core::model::EntryKind::Desktop,
             subtitle: None,
             pinyin_indices: pi,
+            is_alias: false,
         }
     }
 
@@ -616,6 +622,52 @@ mod tests {
     }
 
     #[test]
+    fn aliases_hidden_when_query_empty_but_matchable_when_typed() {
+        let (pf, pa, pi) = pinyin_fields("关机");
+        let primary = AppEntry {
+            id: "d:poweroff.desktop".into(),
+            name: "关机".into(),
+            exec: "systemctl poweroff".into(),
+            icon_path: None,
+            hidden: false,
+            pinyin_full: pf,
+            pinyin_abbr: pa,
+            kind: crate::core::model::EntryKind::Desktop,
+            subtitle: None,
+            pinyin_indices: pi,
+            is_alias: false,
+        };
+        let (pf, pa, pi) = pinyin_fields("Power Off");
+        let alias = AppEntry {
+            id: "d:poweroff.desktop:alias".into(),
+            name: "Power Off".into(),
+            exec: "systemctl poweroff".into(),
+            icon_path: None,
+            hidden: false,
+            pinyin_full: pf,
+            pinyin_abbr: pa,
+            kind: crate::core::model::EntryKind::Desktop,
+            subtitle: None,
+            pinyin_indices: pi,
+            is_alias: true,
+        };
+        let apps = vec![primary, alias];
+
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut scratch = MatcherScratch::default();
+
+        // Empty query: only the primary shows (no "twins").
+        let empty = rank(&apps, "", &mut matcher, &mut scratch, None);
+        assert_eq!(empty.len(), 1);
+        assert_eq!(apps[empty[0]].name, "关机");
+
+        // Typing an English query surfaces the alias and highlights it.
+        let en = rank(&apps, "power", &mut matcher, &mut scratch, None);
+        let hit_alias = en.iter().any(|&i| apps[i].name == "Power Off");
+        assert!(hit_alias, "alias not surfaced by english query");
+    }
+
+    #[test]
     fn empty_query_orders_desktop_before_binary() {
         // Mixed kinds, no history: desktop apps must come before binaries,
         // each in original scan order within its tier.
@@ -637,6 +689,7 @@ mod tests {
             kind: crate::core::model::EntryKind::Binary,
             subtitle: None,
             pinyin_indices: i1,
+            is_alias: false,
         });
         apps.push(AppEntry {
             id: "bin:/usr/bin/true".into(),
@@ -649,6 +702,7 @@ mod tests {
             kind: crate::core::model::EntryKind::Binary,
             subtitle: None,
             pinyin_indices: i2,
+            is_alias: false,
         });
 
         let mut matcher = Matcher::new(Config::DEFAULT);
