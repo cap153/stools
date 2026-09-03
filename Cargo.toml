@@ -15,7 +15,9 @@ nucleo-matcher = "0.3"
 pinyin = { version = "0.10", features = ["plain", "heteronym"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
+# Read-only config parsing: `parse` only (serde comes via toml_edit's forced
+# `serde` feature); the `display`/encoder half is never used by stools.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
 bincode = "2.0"
 dirs = "6.0"
 # Same version Slint itself uses, so config font families can be checked
