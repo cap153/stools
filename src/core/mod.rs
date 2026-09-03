@@ -1,4 +1,5 @@
 pub mod config;
+pub mod i18n;
 pub mod history;
 pub mod indexer;
 pub mod keybind;

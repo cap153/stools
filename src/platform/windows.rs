@@ -572,12 +572,21 @@ pub fn run() {
     // ---- Tray icon + menu ---------------------------------------------------
     let quitting = Arc::new(AtomicBool::new(false));
 
+    // Tray labels follow the system locale: Chinese hosts get a Chinese menu,
+    // everything else keeps the existing English labels.
+    let is_zh = crate::core::i18n::is_chinese_locale();
+    let (show_text, reload_text, folder_text, quit_text) = if is_zh {
+        ("显示", "重载配置", "打开配置目录", "退出")
+    } else {
+        ("Show", "Reload config", "Show config folder", "Quit")
+    };
+
     let menu = muda::Menu::new();
-    let show_item = muda::MenuItem::with_id("show", "Show", true, None);
-    let reload_item = muda::MenuItem::with_id("reload_config", "Reload config", true, None);
+    let show_item = muda::MenuItem::with_id("show", show_text, true, None);
+    let reload_item = muda::MenuItem::with_id("reload_config", reload_text, true, None);
     let folder_item =
-        muda::MenuItem::with_id("show_config_folder", "Show config folder", true, None);
-    let quit_item = muda::MenuItem::with_id("quit", "Quit", true, None);
+        muda::MenuItem::with_id("show_config_folder", folder_text, true, None);
+    let quit_item = muda::MenuItem::with_id("quit", quit_text, true, None);
 
     let _ = menu.append(&show_item);
     let _ = menu.append(&muda::PredefinedMenuItem::separator());

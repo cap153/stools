@@ -249,8 +249,9 @@ impl Config {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            let _ = fs::write(&path, DEFAULT_CONFIG_TEMPLATE);
-            return toml::from_str(DEFAULT_CONFIG_TEMPLATE).unwrap_or_default();
+            let template = crate::core::i18n::default_config_template();
+            let _ = fs::write(&path, template);
+            return toml::from_str(template).unwrap_or_default();
         }
 
         let Ok(text) = fs::read_to_string(&path) else {
