@@ -280,7 +280,14 @@ export component LauncherWindow inherits Window {
                             // abbreviated head...tail form, right-aligned to the
                             // window edge; while selected it shows the full path.
                             sub1 := Text {
-                                text: subtitle_box.active ? item.subtitle : item.idle_subtitle;
+                                // Show the full path whenever it actually fits the box
+                                // (Slint measures real pixel width via `is_overflow`); only
+                                // fall back to the abbreviated head...tail form when idle AND
+                                // the full path truly overflows. This avoids spurious ellipses
+                                // on paths that are long in characters but narrow in pixels.
+                                text: (!subtitle_box.is_overflow || subtitle_box.active)
+                                    ? item.subtitle
+                                    : item.idle_subtitle;
                                 color: #6272a4;
                                 font-size: 12px;
                                 height: 100%;
