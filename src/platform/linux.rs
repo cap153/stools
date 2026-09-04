@@ -491,6 +491,19 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// `LC_ALL` is process-global, and cargo runs tests in parallel threads
+    /// inside a single process, so the tests that poke it would race and each
+    /// observe the other's locale. The lock serialises just those two.
+    static LOCALE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take `LOCALE_LOCK`, tolerating poisoning so one failing assertion cannot
+    /// wedge every later test that needs the locale.
+    fn lock_locale() -> std::sync::MutexGuard<'static, ()> {
+        LOCALE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     fn write_desktop(dir: &std::path::Path, name: &str, zh: Option<&str>) -> std::path::PathBuf {
         let p = dir.join("sample.desktop");
         let mut c = format!(
@@ -506,6 +519,7 @@ mod tests {
 
     #[test]
     fn zh_desktop_yields_english_alias_under_chinese_locale() {
+        let _locale = lock_locale();
         let dir = std::env::temp_dir().join("stools_test_alias_zh");
         let _ = std::fs::create_dir_all(&dir);
         let p = write_desktop(&dir, "Power Off", Some("关机"));
@@ -546,6 +560,7 @@ mod tests {
     fn identical_names_dont_duplicate_on_non_chinese_locale() {
         // Regression: a non-Chinese session must not emit two identical entries
         // just because Name and Name[zh_CN] share the same string.
+        let _locale = lock_locale();
         let dir = std::env::temp_dir().join("stools_test_alias_nzh");
         let _ = std::fs::create_dir_all(&dir);
         let p = write_desktop(&dir, "Firefox", Some("Firefox"));

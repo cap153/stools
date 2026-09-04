@@ -461,6 +461,22 @@ fn open_config_folder() {
 
 /// The Windows daemon: lives in the tray, registers a global hotkey and toggles
 /// the launcher window between hidden and shown.
+/// The tray badge: decode the PNG that `tools/build_icon.py` renders out of
+/// `assets/icon.svg` and that is baked into the binary here.
+///
+/// Windows asks the shell for a single bitmap and scales it to whatever the
+/// taskbar needs, so the asset is 64x64 — that divides cleanly to 32 (200% DPI)
+/// and 16 (100% DPI) rather than resampling at a fractional ratio.
+fn load_tray_icon() -> Option<tray_icon::Icon> {
+    // Only a corrupt checked-in asset can fail here, and a missing badge is not
+    // worth aborting startup over: fall through to tray-icon's default so the
+    // launcher (and its hotkey) still comes up.
+    let image = image::load_from_memory(include_bytes!("../../assets/icon.png")).ok()?;
+    let rgba = image.to_rgba8();
+    let (width, height) = rgba.dimensions();
+    tray_icon::Icon::from_rgba(rgba.into_raw(), width, height).ok()
+}
+
 pub fn run() {
     let config = Config::load_or_create();
     // Kept so a config reload can rebuild the directory list the same way.
@@ -597,13 +613,19 @@ pub fn run() {
     let _ = menu.append(&muda::PredefinedMenuItem::separator());
     let _ = menu.append(&quit_item);
 
-    let tray = tray_icon::TrayIconBuilder::new()
+    let mut tray_builder = tray_icon::TrayIconBuilder::new()
         .with_menu(Box::new(menu))
         // Without this the menu pops up on left click too, and the native popup
         // steals the focus from the launcher window we are trying to show.
         .with_menu_on_left_click(false)
-        .with_tooltip("stools launcher")
-        .build();
+        .with_tooltip("stools launcher");
+
+    // A tray entry with no icon is just an empty slot in the taskbar.
+    if let Some(icon) = load_tray_icon() {
+        tray_builder = tray_builder.with_icon(icon);
+    }
+
+    let tray = tray_builder.build();
 
     {
         let weak = weak.clone();

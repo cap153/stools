@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <defs>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+
+  <!-- 1. 背景圆角矩形 -->
+  <rect x="16" y="16" width="224" height="224" rx="56" ry="56" 
+        fill="#282a36" stroke="#bd93f9" stroke-width="14" filter="url(#shadow)"/>
+
+  <!-- 2. 终端提示符 > (亮青色) -->
+  <path d="M 76 68 L 150 128 L 76 188" fill="none" 
+        stroke="#8be9fd" stroke-width="26" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- 3. 命令行光标 _ (极客绿) -->
+  <line x1="168" y1="186" x2="196" y2="186" 
+        stroke="#50fa7b" stroke-width="22" stroke-linecap="round"/>
+</svg>
