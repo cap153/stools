@@ -118,41 +118,30 @@ impl Default for ThemeConfig {
 }
 
 /// Written verbatim on first run; documents every knob in English.
-pub const DEFAULT_CONFIG_TEMPLATE: &str = r##"# =============================================================================
-# stools launcher configuration
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r##"# stools launcher configuration
 #
-#   Linux   : $XDG_CONFIG_HOME/stools/config.toml  (usually ~/.config/stools/config.toml)
-#   Windows : %APPDATA%\stools\config.toml
+# Linux   : ~/.config/stools/config.toml
+# Windows : %APPDATA%\stools\config.toml
 #
-# This file was generated on first run and only contains defaults, so deleting
-# it (or any single entry) simply restores the stock behaviour.
-# =============================================================================
+# Generated on first run; every entry is optional, so deleting this file (or
+# any single entry) simply restores the stock behaviour.
 
-# -----------------------------------------------------------------------------
-# Extra directories to search, in addition to the built-in ones
-# (Windows: both Start Menus and both desktops; Linux: ~/.local/share/applications,
-# /usr/share/applications, ~/.local/bin, /usr/bin, ...).
-# Executables are picked up everywhere; on Linux .desktop files placed in these
-# directories are indexed as well.
-#
-# "~" (including "~/..." and "~\..."), "$VAR", "${VAR}" and "%VAR%" are expanded.
-# Directories that do not exist are silently ignored.
+# Extra directories to search, on top of the built-in ones. Executables are
+# picked up everywhere; on Linux, .desktop files placed in these directories
+# are indexed as well. "~", "$VAR", "${VAR}" and "%VAR%" are expanded, and
+# directories that do not exist are ignored.
 #
 # Windows note: inside "..." a backslash starts a TOML escape sequence, so
-# "C:\Users\me" is invalid TOML. Write Windows paths with single quotes, forward
-# slashes, or doubled backslashes — all three work:
+# "C:\Users\me" is invalid TOML. Write Windows paths with single quotes,
+# forward slashes, or doubled backslashes — all three work:
 #     'C:\Users\me\Downloads'      "C:/Users/me/Downloads"      "C:\\Users\\me"
-# -----------------------------------------------------------------------------
 path = [
 #     "$HOME/.cargo/bin",
-#     "~/.deno/bin",
-#     '%APPDATA%\Microsoft\Windows\Start Menu\Programs',
 #     'C:\ProgramData\Microsoft\Windows\Start Menu\Programs',
 #     '~/Downloads',
 #     "C:/Tools",
 ]
 
-# -----------------------------------------------------------------------------
 # Keybindings: override the defaults or add new ones.
 #
 # Actions:
@@ -160,25 +149,21 @@ path = [
 #   "up"      - select the previous entry
 #   "execute" - launch the selected entry
 #   "close"   - Linux: quit stools / Windows: hide the window
-#   "stools"  - summon the window (registered as a global hotkey on Windows)
+#   "stools"  - summon the window (global hotkey on Windows; only one binding
+#               may use it, so delete this line if you move the summon key)
 #
-# Key names are case-insensitive and accept both the XKB spelling reported by
-# `wev` (Escape, Return, Tab, Up, Down, Prior, Next, space, ...) and the usual
-# aliases (esc, enter, pageup, pagedown, ...). Single characters are literal
-# keys ("a", "u", "/").
+# Key names are case-insensitive and accept both the XKB spelling (Escape,
+# Return, Prior, Next, space, ...) and aliases (esc, enter, pageup, pagedown,
+# ...). Single characters are literal keys ("a", "u", "/").
 #
 # The table name is the modifier combination; modifiers may be combined freely
 # and in any order:
 #   [keybindings]                 - no modifier
 #   [keybindings.none]            - same as above
-#   [keybindings.shift]
-#   [keybindings.ctrl]
 #   [keybindings.alt_shift]
-#   [keybindings.alt_ctrl_shift]
 #   [keybindings."super+shift"]   - quote the name when using "+"
 # Recognised modifier words: ctrl (control), alt (option), shift, super
 # (win, meta, cmd).
-# -----------------------------------------------------------------------------
 [keybindings]
 tab = "down"       # select the next entry
 esc = "close"      # Linux: quit stools / Windows: hide the window
@@ -191,22 +176,16 @@ tab = "up"         # select the previous entry
 
 [keybindings.alt]
 a = "stools"       # summon the window (global hotkey on Windows)
-                   # only one binding may use "stools": change or delete this line
-                   # when you move the summon key elsewhere
 
 # [keybindings.ctrl]
 # u = "up"         # example: add ctrl+u to select the previous entry
 # e = "down"       # example: add ctrl+e to select the next entry
-
-# -----------------------------------------------------------------------------
 # Theme. Colours use Fuzzel's RRGGBBAA hex notation (a leading '#' is allowed,
 # RGB / RGBA / RRGGBB are accepted too), so Fuzzel themes can be reused as-is.
 # The defaults below are Dracula.
-# -----------------------------------------------------------------------------
 [theme]
-# Colours are RRGGBBAA. "match" / "selection-match" colour the characters of
-# the query inside an entry name (selection-match when the row is selected),
-# "prompt" colours the ">" input prompt.
+# "match" / "selection-match" colour the query characters inside an entry name
+# (the latter when the row is selected); "prompt" colours the ">" prompt.
 background = "282a36dd"
 text = "f8f8f2ff"
 prompt = "586e75ff"

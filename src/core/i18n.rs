@@ -36,40 +36,29 @@ pub fn is_chinese_locale() -> bool {
 }
 
 /// Chinese default config template. Same keys, same values, same structure.
-pub const DEFAULT_CONFIG_TEMPLATE_ZH: &str = r##"# =============================================================================
-# stools 启动器配置文件
+pub const DEFAULT_CONFIG_TEMPLATE_ZH: &str = r##"# stools 启动器配置文件
 #
-#   Linux   : $XDG_CONFIG_HOME/stools/config.toml  （通常为 ~/.config/stools/config.toml）
-#   Windows : %APPDATA%\stools\config.toml
+# Linux   : ~/.config/stools/config.toml
+# Windows : %APPDATA%\stools\config.toml
 #
-# 本文件在首次运行时自动生成，其中只包含了默认配置。删除本文件（或其中任意
+# 本文件在首次运行时自动生成，其中每一项都是可选的。删除本文件（或其中任意
 # 一项配置）即可恢复软件的出厂行为。
-# =============================================================================
 
-# -----------------------------------------------------------------------------
-# 额外检索目录（在系统内置路径之外追加检索）
-# (Windows 默认已包含：用户与系统的开始菜单、用户与公共桌面；Linux 默认已包含：
-# ~/.local/share/applications, /usr/share/applications, ~/.local/bin, /usr/bin ...)
-# 所有目录都会检索可执行文件；在 Linux 下放置在这些目录中的 .desktop 文件也会被索引。
-#
-# 支持 "~"（包括 "~/" 和 "~\")、"$VAR"、"${VAR}" 以及 "%VAR%" 环境变量展开。
-# 不存在的目录会被直接忽略。
+# 额外检索目录（在系统内置路径之外追加）。所有目录都会检索可执行文件；在 Linux
+# 下放置在这些目录中的 .desktop 文件也会被索引。支持 "~"、"$VAR"、"${VAR}" 与
+# "%VAR%" 展开，不存在的目录会被忽略。
 #
 # Windows 路径提示：在双引号 "..." 内反斜杠会被当作 TOML 转义符，因此
 # "C:\Users\me" 会在语法上出错。书写 Windows 路径时请使用单引号、正斜杠，或者
 # 双反斜杠（三者均可被正确识别）：
 #     'C:\Users\me\Downloads'      "C:/Users/me/Downloads"      "C:\\Users\\me"
-# -----------------------------------------------------------------------------
 path = [
 #     "$HOME/.cargo/bin",
-#     "~/.deno/bin",
-#     '%APPDATA%\Microsoft\Windows\Start Menu\Programs',
 #     'C:\ProgramData\Microsoft\Windows\Start Menu\Programs',
 #     '~/Downloads',
 #     "C:/Tools",
 ]
 
-# -----------------------------------------------------------------------------
 # 快捷键：覆盖默认值或新增绑定。
 #
 # 动作 (Action)：
@@ -77,22 +66,19 @@ path = [
 #   "up"      - 选择上一项
 #   "execute" - 启动选中的条目
 #   "close"   - Linux 下退出 stools / Windows 下隐藏窗口
-#   "stools"  - 唤出窗口（在 Windows 上注册为全局热键）
+#   "stools"  - 唤出窗口（在 Windows 上注册为全局热键；该动作只能绑定一次，
+#               若把唤出热键移到别处，请删除此行）
 #
-# 按键名称不区分大小写，同时接受 `wev` 报告的 XKB 拼写（Escape、Return、Tab、
-# Up、Down、Prior、Next、space 等）以及常用别名（esc、enter、pageup、pagedown 等）。
-# 单个字符即表示对应的实体按键（"a"、"u"、"/"）。
+# 按键名称不区分大小写，同时接受 XKB 拼写（Escape、Return、Prior、Next、space
+# 等）以及常用别名（esc、enter、pageup、pagedown 等）。单个字符即表示对应的
+# 实体按键（"a"、"u"、"/"）。
 #
 # 表名即修饰键的组合；修饰键可以自由组合、顺序不限：
 #   [keybindings]                 - 无修饰键
 #   [keybindings.none]            - 同上
-#   [keybindings.shift]
-#   [keybindings.ctrl]
 #   [keybindings.alt_shift]
-#   [keybindings.alt_ctrl_shift]
 #   [keybindings."super+shift"]   - 使用 "+" 时需要对表名加引号
 # 可识别的修饰键：ctrl (control)、alt (option)、shift、super (win、meta、cmd)。
-# -----------------------------------------------------------------------------
 [keybindings]
 tab = "down"       # 选择下一项
 esc = "close"      # Linux 下退出 stools / Windows 下隐藏窗口
@@ -105,21 +91,16 @@ tab = "up"         # 选择上一项
 
 [keybindings.alt]
 a = "stools"       # 唤出窗口（Windows 全局热键）
-                   # 只能有一个快捷键绑定到 "stools" 动作：若把唤出热键移到别处，
-                   # 请修改或删除此行
 
 # [keybindings.ctrl]
 # u = "up"         # 示例：绑定 Ctrl+U 选择上一项
 # e = "down"       # 示例：绑定 Ctrl+E 选择下一项
-
-# -----------------------------------------------------------------------------
 # 主题设置。颜色采用 Fuzzel 的 RRGGBBAA 十六进制记法（允许以 '#' 开头；RGB /
 # RGBA / RRGGBB 同样支持），因此可以直接复用 Fuzzel 的主题配置。
 # 下方为默认值（Dracula 配色）。
-# -----------------------------------------------------------------------------
 [theme]
-# 颜色均为 RRGGBBAA。"match" / "selection-match" 用于高亮条目名称中与查询匹配的
-# 字符（选中行时使用 selection-match），"prompt" 为输入框前 ">" 提示符的颜色。
+# "match" / "selection-match" 用于高亮条目名称中与查询匹配的字符（选中行时使用
+# selection-match），"prompt" 为输入框前 ">" 提示符的颜色。
 background = "282a36dd"
 text = "f8f8f2ff"
 prompt = "586e75ff"
