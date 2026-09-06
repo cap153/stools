@@ -15,6 +15,8 @@
   二进制排序低于应用，并以灰色副标题显示所在目录。
 - **MRU 历史** — 最近与常用条目自动置顶
   （`~/.local/share/stools/history.json`）。
+- **渲染引擎可配置** — 软件渲染（约 30MB，不占用显卡）或 OpenGL 硬件加速；
+  Linux 默认 OpenGL，Windows 默认软件渲染。
 - **Linux** — 单次运行、无状态；索引缓存在 `~/.cache`，冷启动近乎瞬时。无托盘、
   无内置热键，由窗口管理器绑定按键。
 - **Windows** — 托盘常驻守护进程，支持全局热键（默认 **Alt+A**）。
@@ -84,6 +86,7 @@ stools 按设计不提供插件系统。把现成的快捷方式放进已扫描�
 报错并回退到默认值，因此配置写坏也绝不会导致启动器起不来。
 
 ```toml
+# renderer = "cpu"               # 默认：Linux 为 "gpu" / Windows 为 "cpu"
 path = ["$HOME/.cargo/bin"]      # 额外扫描目录（会展开 ~、$VAR、%VAR%）
 
 [keybindings]                    # 无修饰键
@@ -110,6 +113,13 @@ selection-text = "f8f8f2ff"
 border = "bd93f9ff"
 font = ["ComicShannsMono Nerd Font", "LXGW WenKai GB Screen"]
 ```
+
+**渲染引擎** — `renderer` 在软件渲染（无 GPU 上下文，内存约 30MB）与 OpenGL 硬件
+加速（约多 150MB）之间切换。默认值：Linux 为 `"gpu"` —— 软件渲染器未实现
+`border-radius` 与 `clip` 的组合，在 Wayland 下窗口圆角四周会留有瑕疵；Windows 为
+`"cpu"`，渲染正常。渲染引擎在进程启动时即已确定，因此 Windows 修改后需重启
+stools；Linux 下次呼出即生效。命令行指定 `SLINT_BACKEND=winit-software` /
+`=winit-femtovg` 可临时覆盖配置。
 
 **搜索路径** — `path` 会追加到内置目录集合（`~/.local/bin`、`/usr/local/bin`、
 `/usr/bin`、`/bin`、`/usr/sbin`、`/sbin`、`/home/linuxbrew/.linuxbrew/bin`）之上，
@@ -155,11 +165,13 @@ src/
 
 ```sh
 STOOLS_DEBUG=1 stools
-# [stools] load=89.4µs new=26.4ms model=37.1ms show=46.2ms apps=159
+# [stools] renderer=software
+# [stools] load=2.4ms trim=2.4ms new=26.4ms model=37.1ms show=46.2ms apps=159
 # [stools] search-rebuild=48.2µs n=10
 ```
 
-`load` = 索引载入（命中缓存或全量扫描），`new` = Slint/GPU 初始化，`model` /
+`renderer` = 当前使用的 Slint 渲染器，`load` = 索引载入（命中缓存或全量扫描），
+`trim` = 将扫描期临时内存归还内核，`new` = Slint 窗口与渲染器初始化，`model` /
 `show` = 构建首屏列表并显示窗口，`search-rebuild` = 每次按键的重排序耗时
 （`n` 为匹配数）。
 

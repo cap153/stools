@@ -8,6 +8,11 @@ description = "A minimal Fuzzel-style application launcher built with Slint"
 slint = { version = "1.11", default-features = false, features = [
     "backend-winit",
     "renderer-femtovg",
+    # Software renderer, selectable at runtime with SLINT_BACKEND=winit-software.
+    # Skips GL/context setup, which is otherwise most of the startup cost.
+    # Caveat: it does not implement `border-radius` + `clip: true`, and its text
+    # layout is documented as western-scripts only.
+    "renderer-software",
     "compat-1-2",
     "raw-window-handle-06",
 ] }

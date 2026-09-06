@@ -15,11 +15,13 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     /// Extra directories to scan for executables (and `.desktop` files).
     pub path: Vec<String>,
+    /// Which Slint renderer to use: `"cpu"` (software, no GPU) or `"gpu"`.
+    pub renderer: String,
     /// Colours and fonts.
     pub theme: ThemeConfig,
     /// `modifier table name` → (`key name` → `action name`).
@@ -30,6 +32,26 @@ pub struct Config {
     /// under `[keybindings]` (no modifier) are collected under the `""` name.
     #[serde(deserialize_with = "deserialize_keybindings")]
     pub keybindings: HashMap<String, HashMap<String, String>>,
+}
+
+/// Renderer used when the config file does not name one.
+///
+/// The defaults differ on purpose. The software renderer does not implement
+/// `border-radius` together with `clip` — which stools' rounded main container
+/// uses — and on Wayland that shows as artifacts around the window corners, so
+/// Linux ships with the GPU renderer. On Windows the same corners render
+/// correctly and the software renderer is the default (no GPU context at all).
+pub const DEFAULT_RENDERER: &str = if cfg!(windows) { "cpu" } else { "gpu" };
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            path: Vec::new(),
+            renderer: DEFAULT_RENDERER.into(),
+            theme: ThemeConfig::default(),
+            keybindings: HashMap::new(),
+        }
+    }
 }
 
 /// `[keybindings]` mixes plain `key = "action"` pairs (no modifier) with nested
@@ -142,6 +164,17 @@ path = [
 #     "C:/Tools",
 ]
 
+# Renderer: "cpu" — software rendering: no GPU at all, ~30MB of memory.
+#           "gpu" — OpenGL hardware acceleration, ~180MB of memory.
+# Default: "gpu" on Linux (the software renderer still draws artifacts around
+#          the window's rounded corners on Wayland), "cpu" on Windows, where it
+#          renders correctly. Leave the line below commented out for the default.
+# An explicit SLINT_BACKEND=winit-software / =winit-femtovg on the command line
+# overrides this for a single run.
+# Windows: the renderer is fixed when the tray process starts, so changing this
+# needs a restart of stools; on Linux it applies on the next invocation.
+# renderer = "cpu"
+
 # Keybindings: override the defaults or add new ones.
 #
 # Actions:
@@ -177,9 +210,10 @@ tab = "up"         # select the previous entry
 [keybindings.alt]
 a = "stools"       # summon the window (global hotkey on Windows)
 
-# [keybindings.ctrl]
-# u = "up"         # example: add ctrl+u to select the previous entry
-# e = "down"       # example: add ctrl+e to select the next entry
+[keybindings.ctrl]
+u = "up"         # example: add ctrl+u to select the previous entry
+e = "down"       # example: add ctrl+e to select the next entry
+
 # Theme. Colours use Fuzzel's RRGGBBAA hex notation (a leading '#' is allowed,
 # RGB / RGBA / RRGGBB are accepted too), so Fuzzel themes can be reused as-is.
 # The defaults below are Dracula.
@@ -210,6 +244,36 @@ font = [
 "##;
 
 impl Config {
+    /// Select the Slint renderer named by [`Self::renderer`], before the first
+    /// window exists: the backend is a process-wide singleton, so on Windows —
+    /// where stools stays resident in the tray — a change only takes effect
+    /// after a restart (the generated config template says so too).
+    ///
+    /// An explicit `SLINT_BACKEND=...` on the command line wins, so both
+    /// renderers can be compared without touching the config.
+    pub fn apply_backend(&self) {
+        if std::env::var_os("SLINT_BACKEND").is_some() {
+            return;
+        }
+        let name = match self.renderer.trim().to_ascii_lowercase().as_str() {
+            "gpu" | "opengl" | "femtovg" => "femtovg",
+            _ => "software",
+        };
+        if std::env::var("STOOLS_DEBUG").is_ok() {
+            eprintln!("[stools] renderer={name}");
+        }
+        if let Err(err) = slint::BackendSelector::new()
+            .backend_name("winit".into())
+            .renderer_name(name.into())
+            .select()
+        {
+            eprintln!(
+                "[stools] renderer {:?} is unavailable ({err}); using Slint's default",
+                self.renderer
+            );
+        }
+    }
+
     /// `<config dir>/stools/config.toml` for the current platform.
     pub fn config_path() -> PathBuf {
         dirs::config_dir()
@@ -454,11 +518,28 @@ mod tests {
         assert_eq!(cfg.theme.marquee_duration, theme.marquee_duration);
         // Every sample path is commented out: scanning extra directories is opt-in.
         assert!(cfg.path.is_empty());
-        // [keybindings], [keybindings.shift] and [keybindings.alt]
-        assert_eq!(cfg.keybindings.len(), 3);
+        // [keybindings], [keybindings.shift], [keybindings.alt] and
+        // [keybindings.ctrl] — ctrl+u / ctrl+e ship active.
+        assert_eq!(cfg.keybindings.len(), 4);
         assert_eq!(cfg.keybindings[""]["esc"], "close");
         assert_eq!(cfg.keybindings["shift"]["tab"], "up");
         assert_eq!(cfg.keybindings["alt"]["a"], "stools");
+        assert_eq!(cfg.keybindings["ctrl"]["u"], "up");
+        assert_eq!(cfg.keybindings["ctrl"]["e"], "down");
+        // The template leaves the renderer commented out, so the platform
+        // default applies.
+        assert_eq!(cfg.renderer, DEFAULT_RENDERER);
+    }
+
+    #[test]
+    fn default_renderer_follows_the_platform() {
+        let expected = if cfg!(windows) { "cpu" } else { "gpu" };
+        assert_eq!(Config::default().renderer, expected);
+        // An explicit value always wins over the platform default.
+        let explicit: Config = toml::from_str("renderer = \"cpu\"\n").unwrap();
+        assert_eq!(explicit.renderer, "cpu");
+        let explicit: Config = toml::from_str("renderer = \"gpu\"\n").unwrap();
+        assert_eq!(explicit.renderer, "gpu");
     }
 
     #[test]

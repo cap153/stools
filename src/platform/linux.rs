@@ -617,6 +617,8 @@ mod tests {
 pub fn run() {
     let t0 = std::time::Instant::now();
     let config = Config::load_or_create();
+    // Before the first window exists: the renderer is a process-wide choice.
+    config.apply_backend();
     let cli_dirs: Vec<String> = env::args().skip(1).collect();
 
     // Config file paths come first, CLI arguments extend them.

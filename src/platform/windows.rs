@@ -498,6 +498,9 @@ fn load_tray_icon() -> Option<tray_icon::Icon> {
 
 pub fn run() {
     let config = Config::load_or_create();
+    // Before the first window exists: the renderer is a process-wide choice, so
+    // a later change only lands when the tray process is restarted.
+    config.apply_backend();
     // Kept so a config reload can rebuild the directory list the same way.
     let cli_dirs: Vec<String> = std::env::args().skip(1).collect();
     let mut extra_dirs = config.path.clone();

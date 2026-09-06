@@ -15,6 +15,8 @@ English | [简体中文](README.zh-CN.md)
   directories. Binaries rank below apps and show their directory as a subtitle.
 - **MRU history** — recent and frequent items float to the top
   (`~/.local/share/stools/history.json`).
+- **Configurable renderer** — software rendering (no GPU, ~30MB of memory) or
+  OpenGL. Linux defaults to OpenGL, Windows to software.
 - **Linux** — single-shot; the index is cached under `~/.cache` for a near-instant
   start. No tray, no built-in hotkey: your WM binds the key.
 - **Windows** — tray daemon with a global hotkey (default **Alt+A**).
@@ -86,6 +88,7 @@ parse error is printed to `stderr` and the defaults are used, so a broken config
 never blocks startup.
 
 ```toml
+# renderer = "cpu"               # default: "gpu" on Linux / "cpu" on Windows
 path = ["$HOME/.cargo/bin"]      # extra scan dirs (~, $VAR, %VAR% expanded)
 
 [keybindings]                    # no modifier
@@ -112,6 +115,15 @@ selection-text = "f8f8f2ff"
 border = "bd93f9ff"
 font = ["ComicShannsMono Nerd Font", "LXGW WenKai GB Screen"]
 ```
+
+**Renderer** — `renderer` picks software rendering (no GPU context, ~30MB of
+memory) or OpenGL hardware acceleration (~150MB more). The default is `"gpu"` on
+Linux — the software renderer does not implement `border-radius` with `clip`,
+which leaves artifacts around the rounded window corners on Wayland — and `"cpu"`
+on Windows, where it renders correctly. The renderer is chosen once when the
+process starts, so on Windows a change needs a restart; on Linux it applies on
+the next invocation. `SLINT_BACKEND=winit-software` / `=winit-femtovg` on the
+command line overrides the config for a single run.
 
 **Search paths** — `path` extends the built-in set (`~/.local/bin`,
 `/usr/local/bin`, `/usr/bin`, `/bin`, `/usr/sbin`, `/sbin`,
@@ -159,13 +171,15 @@ src/
 
 ```sh
 STOOLS_DEBUG=1 stools
-# [stools] load=89.4µs new=26.4ms model=37.1ms show=46.2ms apps=159
+# [stools] renderer=software
+# [stools] load=2.4ms trim=2.4ms new=26.4ms model=37.1ms show=46.2ms apps=159
 # [stools] search-rebuild=48.2µs n=10
 ```
 
-`load` = index load (cache hit or full scan), `new` = Slint/GPU init, `model` /
-`show` = build the first rows and show the window, `search-rebuild` = per
-keystroke re-rank (`n` = matches).
+`renderer` = the Slint renderer in use, `load` = index load (cache hit or full
+scan), `trim` = hand the scan's scratch memory back to the kernel, `new` = Slint
+window + renderer init, `model` / `show` = build the first rows and show the
+window, `search-rebuild` = per keystroke re-rank (`n` = matches).
 
 ## Tests
 

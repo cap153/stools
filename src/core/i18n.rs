@@ -59,6 +59,15 @@ path = [
 #     "C:/Tools",
 ]
 
+# 渲染引擎："cpu" — 纯 CPU 软件渲染：完全不占用显卡，内存约 30MB。
+#           "gpu" — OpenGL 硬件加速，内存约 180MB。
+# 默认值：Linux 为 "gpu"（软件渲染在 Wayland 下窗口圆角四周仍有瑕疵），
+#         Windows 为 "cpu"（渲染正常）。保持下面这行注释即可使用平台默认值。
+# 命令行显式指定 SLINT_BACKEND=winit-software / =winit-femtovg 可临时覆盖此项。
+# Windows 注意：渲染引擎在托盘进程启动时即已确定，修改本项需重启 stools 才能生效
+# （Linux 为单次呼出模式，下次呼出即生效）。
+# renderer = "cpu"
+
 # 快捷键：覆盖默认值或新增绑定。
 #
 # 动作 (Action)：
@@ -92,9 +101,10 @@ tab = "up"         # 选择上一项
 [keybindings.alt]
 a = "stools"       # 唤出窗口（Windows 全局热键）
 
-# [keybindings.ctrl]
-# u = "up"         # 示例：绑定 Ctrl+U 选择上一项
-# e = "down"       # 示例：绑定 Ctrl+E 选择下一项
+[keybindings.ctrl]
+u = "up"         # 示例：绑定 Ctrl+U 选择上一项
+e = "down"       # 示例：绑定 Ctrl+E 选择下一项
+
 # 主题设置。颜色采用 Fuzzel 的 RRGGBBAA 十六进制记法（允许以 '#' 开头；RGB /
 # RGBA / RRGGBB 同样支持），因此可以直接复用 Fuzzel 的主题配置。
 # 下方为默认值（Dracula 配色）。
