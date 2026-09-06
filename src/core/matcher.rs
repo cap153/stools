@@ -11,19 +11,27 @@ use super::model::AppEntry;
 /// `pinyin_abbr` / `pinyin_full` (both pure ASCII, so char == byte offsets).
 /// Heteronym characters own several disjoint ranges — one per reading — so any
 /// hit inside them highlights the same underlying character.
+///
+/// `u16` rather than `usize`: a name is a file name or a `.desktop` `Name`, so
+/// 65535 name characters (or pinyin characters) is far past anything real. It
+/// shrinks the struct from 40 to 10 bytes, which fits six entries in a 64-byte
+/// cache line instead of one and a half — fewer cache misses per binary search.
 #[derive(
     Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Encode, Decode,
 )]
 pub struct FieldIndicesEntry {
-    pub name_idx: usize,
-    pub abbr_start: usize,
-    pub abbr_end: usize,
-    pub full_start: usize,
-    pub full_end: usize,
+    pub name_idx: u16,
+    pub abbr_start: u16,
+    pub abbr_end: u16,
+    pub full_start: u16,
+    pub full_end: u16,
 }
 
 /// The full reverse map for one entry, sorted by pinyin offset so the entry
 /// covering a match can be found with a binary search.
+///
+/// Empty for a pure-ASCII name, where the map would be the identity anyway (see
+/// [`pinyin_fields`]) — that is the common case, and it costs nothing at all.
 #[derive(
     Clone, Debug, Default, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize, Encode, Decode,
 )]
@@ -35,15 +43,25 @@ pub struct FieldIndices {
 impl FieldIndices {
     /// Character index in `name` owning the abbreviation character at `idx`.
     pub fn name_idx_for_abbr(&self, idx: usize) -> Option<usize> {
-        self.lookup(idx, true)
+        match self.entries.is_empty() {
+            // Pure-ASCII: pinyin index == name index, no translation needed.
+            true => Some(idx),
+            false => self.lookup(idx, true).map(usize::from),
+        }
     }
 
     /// Character index in `name` owning the full-pinyin character at `idx`.
     pub fn name_idx_for_full(&self, idx: usize) -> Option<usize> {
-        self.lookup(idx, false)
+        match self.entries.is_empty() {
+            true => Some(idx),
+            false => self.lookup(idx, false).map(usize::from),
+        }
     }
 
-    fn lookup(&self, idx: usize, abbr: bool) -> Option<usize> {
+    fn lookup(&self, idx: usize, abbr: bool) -> Option<u16> {
+        // A name long enough to overflow `u16` cannot exist (see the struct
+        // docs); bail out rather than silently wrap into a wrong range.
+        let idx = u16::try_from(idx).ok()?;
         let start = |e: &FieldIndicesEntry| if abbr { e.abbr_start } else { e.full_start };
         let end = |e: &FieldIndicesEntry| if abbr { e.abbr_end } else { e.full_end };
         // `entries` is sorted by start, so the first entry whose start is past
@@ -62,12 +80,24 @@ impl FieldIndices {
 ///
 /// For heteronym (multi-pronunciation) characters, *every* reading is included
 /// so the launcher matches regardless of which pronunciation the user types.
-pub fn pinyin_fields(input: &str) -> (String, String, FieldIndices) {
+pub fn pinyin_fields(input: &str) -> (Box<str>, Box<str>, FieldIndices) {
+    // Pure-ASCII names — the overwhelming majority (`ls`, `gcc`, `firefox`) —
+    // need no reverse map: every character is its own pinyin, so `name`,
+    // `pinyin_full` and `pinyin_abbr` are all the same lowercased string and a
+    // pinyin index already *is* a name index. Skipping the per-character table
+    // keeps one heap allocation out of the index per entry.
+    if input.is_ascii() {
+        let lower = input.to_ascii_lowercase().into_boxed_str();
+        return (lower.clone(), lower, FieldIndices::default());
+    }
+
     let mut full = String::with_capacity(input.len() + 8);
     let mut abbr = String::with_capacity(input.len());
     let mut entries = Vec::with_capacity(input.len());
 
-    let abbr_len = |s: &str| s.chars().count();
+    // Pinyin is ASCII, but the name itself may not be, so offsets are counted
+    // in characters (what the highlighter asks about), never in bytes.
+    let abbr_len = |s: &str| s.chars().count() as u16;
 
     for (name_idx, ch) in input.chars().enumerate() {
         let abbr_start = abbr_len(&abbr);
@@ -83,9 +113,9 @@ pub fn pinyin_fields(input: &str) -> (String, String, FieldIndices) {
                 if seen_plain.insert(plain) {
                     full.push_str(plain);
                     entries.push(FieldIndicesEntry {
-                        name_idx,
-                        abbr_start: abbr_start + seen_abbr.len(),
-                        abbr_end: abbr_start + seen_abbr.len() + 1,
+                        name_idx: name_idx as u16,
+                        abbr_start: abbr_start + seen_abbr.len() as u16,
+                        abbr_end: abbr_start + seen_abbr.len() as u16 + 1,
                         full_start: abbr_len(&full) - abbr_len(plain),
                         full_end: abbr_len(&full),
                     });
@@ -104,7 +134,7 @@ pub fn pinyin_fields(input: &str) -> (String, String, FieldIndices) {
             full.push(ch.to_ascii_lowercase());
             abbr.push(ch.to_ascii_lowercase());
             entries.push(FieldIndicesEntry {
-                name_idx,
+                name_idx: name_idx as u16,
                 abbr_start,
                 abbr_end: abbr_len(&abbr),
                 full_start,
@@ -114,7 +144,11 @@ pub fn pinyin_fields(input: &str) -> (String, String, FieldIndices) {
     }
 
     entries.sort_by_key(|e| (e.abbr_start, e.full_start));
-    (full, abbr, FieldIndices { entries })
+    (
+        full.into_boxed_str(),
+        abbr.into_boxed_str(),
+        FieldIndices { entries },
+    )
 }
 
 /// One run of characters for the UI to render (matched runs get the highlight
@@ -326,10 +360,10 @@ pub fn rank(
             let eb = &items[b];
 
             let ha = history
-                .and_then(|h| h.get(&ea.id))
+                .and_then(|h| h.get(&*ea.id))
                 .map_or(0u64, |r| r.last_used);
             let hb = history
-                .and_then(|h| h.get(&eb.id))
+                .and_then(|h| h.get(&*eb.id))
                 .map_or(0u64, |r| r.last_used);
 
             // Tier 1: entries with history sort by recency (newest first).
@@ -379,7 +413,7 @@ pub fn rank(
             }
             // History boost: frequently-used items climb higher.
             if let Some(hist) = history {
-                if let Some(h) = hist.get(&entry.id) {
+                if let Some(h) = hist.get(&*entry.id) {
                     let boost = (h.count.min(20) * 15) as u16;
                     s = s.saturating_add(boost);
                 }
@@ -437,9 +471,9 @@ mod tests {
     fn entry(id: &str, name: &str) -> AppEntry {
         let (pf, pa, pi) = pinyin_fields(name);
         AppEntry {
-            id: id.to_string(),
-            name: name.to_string(),
-            exec: String::new(),
+            id: id.into(),
+            name: name.into(),
+            exec: "".into(),
             icon_path: None,
             hidden: false,
             pinyin_full: pf,
@@ -470,7 +504,7 @@ mod tests {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scratch = MatcherScratch::default();
         let idxs = rank(&apps, query, &mut matcher, &mut scratch, None);
-        idxs.into_iter().map(|i| apps[i].name.clone()).collect()
+        idxs.into_iter().map(|i| apps[i].name.to_string()).collect()
     }
 
     /// Timing harness (not an assertion): `cargo test --release keystroke -- --nocapture`
@@ -579,6 +613,42 @@ mod tests {
     }
 
     #[test]
+    fn ascii_names_need_no_index_table() {
+        // A pure-ASCII name maps to itself, so storing a per-character table
+        // would be pure overhead: the map stays empty and the lookup is the
+        // identity. This is the common case, and it is what keeps the index
+        // from carrying one extra allocation per entry.
+        let (full, abbr, idx) = pinyin_fields("Firefox");
+        assert_eq!(&*full, "firefox");
+        assert_eq!(&*abbr, "firefox");
+        assert!(idx.entries.is_empty());
+        // The identity mapping is what the empty table stands for.
+        assert_eq!(idx.name_idx_for_abbr(3), Some(3));
+        assert_eq!(idx.name_idx_for_full(3), Some(3));
+    }
+
+    #[test]
+    fn ascii_names_with_punctuation_stay_one_to_one() {
+        // Digits and punctuation are ASCII too, so they take the fast path and
+        // keep their 1:1 mapping ("7" stays the first character, not shrunk).
+        let (full, abbr, idx) = pinyin_fields("7-Zip");
+        assert_eq!(&*full, "7-zip");
+        assert_eq!(&*abbr, "7-zip");
+        assert!(idx.entries.is_empty());
+    }
+
+    #[test]
+    fn mixed_names_keep_their_index_table() {
+        // One Chinese character among ASCII still needs the table, and the
+        // ASCII characters around it must stay mapped 1:1.
+        let (_full, _abbr, idx) = pinyin_fields("MATE 顏色選擇區");
+        assert!(!idx.entries.is_empty());
+        // "MATE " is 5 ASCII characters, so index 0..4 map straight through.
+        assert_eq!(idx.name_idx_for_abbr(0), Some(0));
+        assert_eq!(idx.name_idx_for_abbr(4), Some(4));
+    }
+
+    #[test]
     fn pinyin_fields_are_computed() {
         let (full, abbr, _) = pinyin_fields("网易云音乐");
         // Full pinyin includes the syllables of each character.
@@ -659,11 +729,11 @@ mod tests {
         // Empty query: only the primary shows (no "twins").
         let empty = rank(&apps, "", &mut matcher, &mut scratch, None);
         assert_eq!(empty.len(), 1);
-        assert_eq!(apps[empty[0]].name, "关机");
+        assert_eq!(&*apps[empty[0]].name, "关机");
 
         // Typing an English query surfaces the alias and highlights it.
         let en = rank(&apps, "power", &mut matcher, &mut scratch, None);
-        let hit_alias = en.iter().any(|&i| apps[i].name == "Power Off");
+        let hit_alias = en.iter().any(|&i| &*apps[i].name == "Power Off");
         assert!(hit_alias, "alias not surfaced by english query");
     }
 
@@ -714,7 +784,7 @@ mod tests {
         assert_eq!(kinds[2], &crate::core::model::EntryKind::Binary);
         assert_eq!(kinds[3], &crate::core::model::EntryKind::Binary);
         // Names within each tier keep scan order (steam/sorted): Btop,Zed then vimdot,true
-        let names: Vec<_> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.to_string()).collect();
         assert_eq!(names, vec!["Btop", "Zed", "vimdot", "true"]);
     }
 
@@ -745,7 +815,7 @@ mod tests {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scratch = MatcherScratch::default();
         let idxs = rank(&apps, "", &mut matcher, &mut scratch, Some(&hist));
-        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.to_string()).collect();
         // Most recent (Alacritty) first, then the older history entry, then the rest.
         assert_eq!(names[0], "Alacritty");
         assert_eq!(names[1], "Firefox");
@@ -772,7 +842,7 @@ mod tests {
         let mut matcher = Matcher::new(Config::DEFAULT);
         let mut scratch = MatcherScratch::default();
         let idxs = rank(&apps, "a", &mut matcher, &mut scratch, Some(&hist));
-        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.clone()).collect();
+        let names: Vec<String> = idxs.into_iter().map(|i| apps[i].name.to_string()).collect();
         assert_eq!(names[0], "Alacritty", "got {names:?}");
     }
 }

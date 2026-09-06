@@ -13,26 +13,33 @@ pub enum EntryKind {
 ///
 /// Pinyin fields are precomputed once at scan time so searching is just a cheap
 /// string comparison instead of a per-keystroke conversion.
+///
+/// Every field that is written once at scan time and never mutated is a
+/// `Box<str>`, not a `String`: 16 bytes instead of 24, and no spare capacity
+/// hanging off the allocation. With a few thousand entries indexed that is a
+/// few hundred kilobytes, plus a smaller per-entry footprint for the matcher to
+/// walk. (Bincode encodes `Box<str>` and `String` identically, so the on-disk
+/// cache is unaffected apart from the version bump.)
 #[derive(Clone, Debug, Serialize, Deserialize, Encode, Decode)]
 pub struct AppEntry {
     /// Stable, unique identifier (desktop file id on Linux / .lnk path hash on Windows).
-    pub id: String,
+    pub id: Box<str>,
     /// Display name.
-    pub name: String,
+    pub name: Box<str>,
     /// The command / target used to launch the application.
-    pub exec: String,
+    pub exec: Box<str>,
     /// Resolved path to an icon file, if any.
-    pub icon_path: Option<String>,
+    pub icon_path: Option<Box<str>>,
     /// Whether the app should be hidden from results.
     pub hidden: bool,
     /// Concatenated full pinyin (e.g. "wangyiyunyinyue").
-    pub pinyin_full: String,
+    pub pinyin_full: Box<str>,
     /// Concatenated initials pinyin (e.g. "wyyyy").
-    pub pinyin_abbr: String,
+    pub pinyin_abbr: Box<str>,
     /// Whether this is a .desktop entry or a raw binary.
     pub kind: EntryKind,
     /// Optional subtitle shown below the name (e.g. shortened path for binaries).
-    pub subtitle: Option<String>,
+    pub subtitle: Option<Box<str>>,
     /// Character ranges of `pinyin_abbr` / `pinyin_full` owned by each character
     /// of `name` — the reverse map used to highlight the original characters
     /// when a query hits pinyin instead of the text itself.

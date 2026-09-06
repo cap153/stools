@@ -1,6 +1,7 @@
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 use slint::{Image, Model, ModelRc, SharedString, VecModel};
 
@@ -21,11 +22,31 @@ const MAX_VISIBLE_ITEMS: usize = 16;
 /// `Image` is **not** `Send`, so the cache must stay on the UI thread. The
 /// background search (`core::search`) computes results on a worker thread and
 /// pushes them back with `invoke_from_event_loop`; the closure runs on the UI
-/// thread and reads this cache from a `thread_local` rather than capturing it
-/// (which would require it to be `Send`).
+/// thread and reaches this cache through a `thread_local` rather than capturing
+/// it (which would require it to be `Send`).
+///
+/// The state sits behind an `Rc` so every clone shares one map: a clone is how
+/// the closure gets hold of it, and with a plain `HashMap` field each clone
+/// would copy the map and then throw its additions away — the cache would never
+/// actually cache anything. Sharing also means the bound below is enforced on
+/// one real map instead of on short-lived copies.
 pub struct AppImageCache {
-    map: RefCell<HashMap<PathBuf, Image>>,
+    inner: Rc<RefCell<ImageCacheInner>>,
 }
+
+/// Icons the launcher keeps decoded, most recently used last.
+struct ImageCacheInner {
+    map: HashMap<PathBuf, Image>,
+    /// Recency queue, oldest first, holding exactly the keys in `map`.
+    order: VecDeque<PathBuf>,
+}
+
+/// How many decoded icons to keep. The window shows 16 rows, so this is ~8×
+/// that: enough that scrolling through a long list never re-decodes, small
+/// enough that a long-lived tray process cannot creep. Windows shell icons are
+/// 32×32 (4 KB each) and Linux theme icons rarely exceed 128×128, so the whole
+/// cache stays in the low megabytes even when completely full.
+const MAX_CACHED_IMAGES: usize = 128;
 
 thread_local! {
     static THREAD_CACHE: RefCell<Option<AppImageCache>> = const { RefCell::new(None) };
@@ -48,11 +69,12 @@ impl AppImageCache {
 }
 
 impl Clone for AppImageCache {
-    /// `Image` is a cheap handle over already-decoded data, so cloning the cache
-    /// shares the decoded icons instead of re-reading them.
+    /// Shares the decoded icons rather than copying them: every clone points at
+    /// the same (UI-thread-only) map, so icons loaded by one clone are seen by
+    /// all of them.
     fn clone(&self) -> Self {
         Self {
-            map: RefCell::new(self.map.borrow().clone()),
+            inner: self.inner.clone(),
         }
     }
 }
@@ -66,13 +88,27 @@ impl Default for AppImageCache {
 impl AppImageCache {
     pub fn new() -> Self {
         Self {
-            map: RefCell::new(HashMap::new()),
+            inner: Rc::new(RefCell::new(ImageCacheInner {
+                map: HashMap::new(),
+                order: VecDeque::new(),
+            })),
         }
     }
 
+    /// The decoded icon for `path`, loading (and caching) it on a miss.
     fn get(&self, path: &Path) -> Image {
-        if let Some(img) = self.map.borrow().get(path) {
-            return img.clone();
+        let mut inner = self.inner.borrow_mut();
+        // Cloned first: `map.get` borrows `inner`, and the recency shuffle below
+        // needs it mutably.
+        if let Some(img) = inner.map.get(path).cloned() {
+            // Mark it as most recently used so the icons on screen are the last
+            // ones to go. The scan is over at most `MAX_CACHED_IMAGES` keys.
+            if let Some(pos) = inner.order.iter().position(|k| k == path) {
+                if let Some(key) = inner.order.remove(pos) {
+                    inner.order.push_back(key);
+                }
+            }
+            return img;
         }
 
         // On Windows the stored path is the shortcut/executable itself, whose icon
@@ -85,10 +121,26 @@ impl AppImageCache {
         #[cfg(not(windows))]
         let img = Image::load_from_path(path).unwrap_or_default();
 
-        self.map
-            .borrow_mut()
-            .insert(path.to_path_buf(), img.clone());
+        inner.map.insert(path.to_path_buf(), img.clone());
+        inner.order.push_back(path.to_path_buf());
+        while inner.order.len() > MAX_CACHED_IMAGES {
+            let Some(oldest) = inner.order.pop_front() else {
+                break;
+            };
+            inner.map.remove(&oldest);
+        }
         img
+    }
+
+    /// Number of cached icons (test helper: the bound is the point of the cache).
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.borrow().map.len()
+    }
+
+    #[cfg(test)]
+    fn contains(&self, path: &Path) -> bool {
+        self.inner.borrow().map.contains_key(path)
     }
 }
 
@@ -113,13 +165,22 @@ pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache
         .collect::<Vec<_>>();
 
     AppItem {
-        id: SharedString::from(a.id.as_str()),
-        name: SharedString::from(a.name.as_str()),
+        id: SharedString::from(&*a.id),
+        name: SharedString::from(&*a.name),
         spans: ModelRc::new(VecModel::from(spans)),
-        exec: SharedString::from(a.exec.as_str()),
-        icon: match &a.icon_path {
-            Some(p) => cache.get(Path::new(p)),
-            None => Image::default(),
+        exec: SharedString::from(&*a.exec),
+        // Prefer an explicit icon file; when none is stored — Windows shortcuts
+        // (icon pulled from the `.lnk`/`.exe` itself) and Linux binaries — fall
+        // back to `exec`, the target path. On Windows that yields the
+        // shell/embedded icon; elsewhere it resolves to an empty image, which is
+        // exactly the previous `None` behaviour.
+        icon: {
+            let icon_path = a
+                .icon_path
+                .as_deref()
+                .map(Path::new)
+                .unwrap_or_else(|| Path::new(&*a.exec));
+            cache.get(icon_path)
         },
         subtitle: subtitle.into(),
         idle_subtitle: idle_subtitle.into(),
@@ -163,5 +224,64 @@ pub fn sync_model_in_place(target: &VecModel<AppItem>, new_items: Vec<AppItem>) 
         for item in new_items.into_iter().skip(old_len) {
             target.push(item);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Keys that no icon can live at. A failed load caches `Image::default()`
+    /// just like a successful one, which is enough to exercise the bound.
+    fn fake_icon_path(i: usize) -> PathBuf {
+        PathBuf::from(format!("/nonexistent/stools-test-icon-{i}"))
+    }
+
+    #[test]
+    fn icon_cache_never_exceeds_its_bound() {
+        let cache = AppImageCache::new();
+        for i in 0..(MAX_CACHED_IMAGES * 3) {
+            cache.get(&fake_icon_path(i));
+            assert!(
+                cache.len() <= MAX_CACHED_IMAGES,
+                "cache grew to {} at i={i}",
+                cache.len()
+            );
+        }
+        assert_eq!(cache.len(), MAX_CACHED_IMAGES);
+    }
+
+    #[test]
+    fn icon_cache_evicts_the_least_recently_used() {
+        let cache = AppImageCache::new();
+        let oldest = fake_icon_path(0);
+        let second_oldest = fake_icon_path(1);
+        for i in 0..MAX_CACHED_IMAGES {
+            cache.get(&fake_icon_path(i));
+        }
+        assert_eq!(cache.len(), MAX_CACHED_IMAGES);
+
+        // Touching the oldest entry makes it the most recent, so the next
+        // insertion has to evict the *second* oldest instead.
+        cache.get(&oldest);
+        cache.get(&fake_icon_path(MAX_CACHED_IMAGES));
+
+        assert!(cache.contains(&oldest), "the entry just used was evicted");
+        assert!(!cache.contains(&second_oldest), "the LRU entry survived");
+        assert_eq!(cache.len(), MAX_CACHED_IMAGES);
+    }
+
+    #[test]
+    fn icon_cache_clones_share_one_map() {
+        // `clone_on_ui_thread` is how the search worker reaches the cache; if a
+        // clone copied the map, every icon would be decoded afresh on every
+        // keystroke and the bound would only ever apply to throwaway copies.
+        let cache = AppImageCache::new();
+        let clone = cache.clone();
+        let path = fake_icon_path(0);
+        cache.get(&path);
+
+        assert_eq!(clone.len(), 1);
+        assert!(clone.contains(&path));
     }
 }

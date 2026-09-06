@@ -26,6 +26,10 @@ fontique = "0.10"
 
 # Linux-only dependencies
 [target.'cfg(target_os = "linux")'.dependencies]
+# Only for `malloc_trim`, which hands the scan's scratch pages back to the
+# kernel; it already sits in the tree via Slint, but a direct edge keeps the
+# call honest if that ever changes.
+libc = "0.2"
 
 # Windows-only dependencies
 [target.'cfg(windows)'.dependencies]
@@ -41,6 +45,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Graphics_Gdi",
     "Win32_Storage_FileSystem",
     "Win32_Globalization",
+    "Win32_System_Threading",
 ] }
 # Decodes the embedded tray bitmap (assets/icon.png) into the raw RGBA that
 # tray_icon::Icon wants. `image` already sits in the tree via Slint, and PNG is

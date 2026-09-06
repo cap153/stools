@@ -4860,6 +4860,7 @@ dependencies = [
  "fontique",
  "global-hotkey",
  "image",
+ "libc",
  "muda",
  "nucleo-matcher",
  "open",

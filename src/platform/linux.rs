@@ -260,10 +260,10 @@ fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEnt
     result.push(AppEntry {
         // id is the .desktop file's real path so a later same-name collision can
         // show where this entry came from (used as the subtitle origin).
-        id: main_id.clone(),
-        name: primary_name,
-        exec: exec_value.clone(),
-        icon_path: resolved_icon.clone(),
+        id: main_id.as_str().into(),
+        name: primary_name.into(),
+        exec: exec_value.as_str().into(),
+        icon_path: resolved_icon.as_deref().map(Into::into),
         hidden: hidden || no_display,
         pinyin_full: pf,
         pinyin_abbr: pa,
@@ -277,10 +277,10 @@ fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEnt
     if let Some(sec_name) = secondary_name {
         let (pf, pa, pi) = matcher::pinyin_fields(&sec_name);
         result.push(AppEntry {
-            id: format!("{}:alias", main_id),
-            name: sec_name,
-            exec: exec_value,
-            icon_path: resolved_icon,
+            id: format!("{}:alias", main_id).into(),
+            name: sec_name.into(),
+            exec: exec_value.into(),
+            icon_path: resolved_icon.map(Into::into),
             hidden: hidden || no_display,
             pinyin_full: pf,
             pinyin_abbr: pa,
@@ -341,9 +341,9 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
             // subtitle is left empty here; the caller marks it only when an entry's
             // name collides with another entry from a different path.
             entries.push(AppEntry {
-                id,
-                name: name.to_string(),
-                exec: path.to_string_lossy().into_owned(),
+                id: id.into_boxed_str(),
+                name: name.into(),
+                exec: path.to_string_lossy().into_owned().into_boxed_str(),
                 icon_path: None,
                 hidden: false,
                 pinyin_full,
@@ -415,13 +415,13 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
         {
             let origin = match e.kind {
                 // Binaries: the executable path itself.
-                EntryKind::Binary => Path::new(&e.exec),
+                EntryKind::Binary => Path::new(&*e.exec),
                 // Desktop apps: the .desktop file path (kept in `id`).
-                EntryKind::Desktop => Path::new(&e.id),
+                EntryKind::Desktop => Path::new(&*e.id),
             };
             // The row title already carries the file name, so only the folder is
             // shown — that is what tells two same-named entries apart.
-            e.subtitle = Some(path_utils::prettify_dir(origin));
+            e.subtitle = Some(path_utils::prettify_dir(origin).into());
         } else {
             e.subtitle = None;
         }
@@ -433,6 +433,30 @@ fn scan_apps(custom_dirs: &[PathBuf], binary_dirs: &[PathBuf]) -> Vec<AppEntry> 
 // ---------------------------------------------------------------------------
 // Cache with true background refresh
 // ---------------------------------------------------------------------------
+
+/// Give the scan's scratch memory back to the kernel.
+///
+/// Reading and parsing a few thousand `.desktop` files allocates (and frees) a
+/// lot of short-lived strings, and `build_icon_map` builds a large map that is
+/// dropped again before `scan_apps` returns. glibc keeps freed pages in its own
+/// arena rather than returning them, so without this the process sits on RSS it
+/// will never touch again — for a launcher that lives for a few hundred
+/// milliseconds, that would be most of its footprint. `malloc_trim(0)` releases
+/// whatever the allocator can spare; the launcher then settles at its true
+/// working set.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim_memory() {
+    // glibc extension. Only touches the allocator's own free lists, so the
+    // argument (0 = "as much as you can") is the whole contract.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
+/// Nothing to trim outside glibc: musl returns memory eagerly enough on its own
+/// and does not expose `malloc_trim`.
+#[cfg(all(target_os = "linux", not(target_env = "gnu")))]
+fn trim_memory() {}
 
 /// `custom_dirs` are the extra directories from the config file plus the command
 /// line (both `.desktop` files and executables are picked up there);
@@ -540,9 +564,9 @@ mod tests {
         }
 
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].name, "关机");
+        assert_eq!(&*entries[0].name, "关机");
         assert!(!entries[0].is_alias);
-        assert_eq!(entries[1].name, "Power Off");
+        assert_eq!(&*entries[1].name, "Power Off");
         assert!(entries[1].is_alias);
     }
 
@@ -582,7 +606,7 @@ mod tests {
 
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].is_alias);
-        assert_eq!(entries[0].name, "Firefox");
+        assert_eq!(&*entries[0].name, "Firefox");
     }
 }
 
@@ -605,6 +629,11 @@ pub fn run() {
     let apps = load_apps(&custom_dirs, &binary_dirs, !cli_dirs.is_empty());
     let app_count = apps.len();
     let t_load = t0.elapsed();
+    // The scan just churned through thousands of short-lived strings, and the
+    // index is all that is left of them. Hand their pages back before the
+    // window goes up, so the process settles at its real working set.
+    trim_memory();
+    let t_trim = t0.elapsed();
 
     let ui = LauncherWindow::new().unwrap();
     let t_new = t0.elapsed();
@@ -678,8 +707,8 @@ pub fn run() {
     let t_show = t0.elapsed();
     if std::env::var("STOOLS_DEBUG").is_ok() {
         eprintln!(
-            "[stools] load={:?} new={:?} model={:?} show={:?} apps={}",
-            t_load, t_new, t_model, t_show, app_count
+            "[stools] load={:?} trim={:?} new={:?} model={:?} show={:?} apps={}",
+            t_load, t_trim, t_new, t_model, t_show, app_count
         );
     }
     slint::run_event_loop_until_quit().unwrap();

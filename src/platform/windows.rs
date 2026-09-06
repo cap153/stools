@@ -147,12 +147,16 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
             }
             let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&name);
             entries.push(AppEntry {
-                id: format!("bin:{}", path.to_string_lossy()),
-                name,
-                exec: path.to_string_lossy().into_owned(),
+                id: format!("bin:{}", path.to_string_lossy()).into_boxed_str(),
+                name: name.into_boxed_str(),
+                exec: path.to_string_lossy().into_owned().into_boxed_str(),
                 // Icons of the extra directories' binaries come from the .exe
                 // itself, extracted through the shell.
-                icon_path: Some(path.to_string_lossy().into_owned()),
+                // Icons of the extra directories' binaries come from the .exe
+                // itself, extracted through the shell — same as the desktop scan,
+                // so no separate icon path is stored (it would just duplicate
+                // `exec`).
+                icon_path: None,
                 hidden: false,
                 pinyin_full,
                 pinyin_abbr,
@@ -198,15 +202,16 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
         }
         let (pinyin_full, pinyin_abbr, pinyin_indices) = pinyin_fields(&name);
         entries.push(AppEntry {
-            id: path_str.clone(),
-            name,
+            id: path_str.as_str().into(),
+            name: name.into_boxed_str(),
             // Kept as the shortcut's own path; ShellExecute (open crate) resolves
             // `.lnk`, `.url` and `.exe` alike.
-            exec: path_str.clone(),
-            // Icons come from the file itself at render time: they are either
-            // embedded (`.exe`) or resolved by the shell (see
-            // `platform::windows_icon`).
-            icon_path: Some(path_str),
+            exec: path_str.as_str().into(),
+            // No separate icon path: on Windows the icon is pulled out of `exec`
+            // itself (embedded for `.exe`, resolved by the shell for `.lnk`/`.url`)
+            // at render time — see `platform::windows_icon`. Dropping this field
+            // avoids a third allocation of the (often long) path.
+            icon_path: None,
             hidden: false,
             pinyin_full,
             pinyin_abbr,
@@ -233,7 +238,7 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
             .unwrap_or(0)
             > 1)
         // The row title already carries the file name, so only the folder is shown.
-        .then(|| crate::core::path_utils::prettify_dir(Path::new(&e.exec)));
+        .then(|| crate::core::path_utils::prettify_dir(Path::new(&*e.exec)).into());
     }
 
     entries
@@ -262,6 +267,20 @@ fn show_and_focus(ui: &LauncherWindow) {
 
 fn hide_window(ui: &LauncherWindow) {
     let _ = ui.hide();
+
+    // While the launcher sits hidden in the tray the index and UI are idle, so
+    // hand the freed physical pages back to the OS. `SetProcessWorkingSetSize`
+    // with both sizes set to (SIZE_T)-1 — `usize::MAX` — tells Windows to trim
+    // the working set as far as it will allow: the task-manager footprint
+    // collapses from tens of MB to a few, and the pages are faulted back in
+    // within microseconds the next time the window is summoned. This runs on
+    // every hide (Esc, launch, summon toggle).
+    unsafe {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, SetProcessWorkingSetSize,
+        };
+        let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
+    }
 }
 
 /// Keeps the index in step with the file system.
@@ -569,7 +588,9 @@ pub fn run() {
         }
     });
 
-    ui.hide().unwrap();
+    // Start hidden in the tray and immediately hand the freed pages back to the
+    // OS, so the freshly spawned daemon already sits at its minimal footprint.
+    hide_window(&ui);
 
     // ---- Global hotkey: whatever the config binds to "stools" ---------------
     // (default Alt+A; the window can still be summoned from the tray icon).
