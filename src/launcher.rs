@@ -169,18 +169,28 @@ pub fn to_ui_item(a: &AppEntry, matched_indices: &[usize], cache: &AppImageCache
         name: SharedString::from(&*a.name),
         spans: ModelRc::new(VecModel::from(spans)),
         exec: SharedString::from(&*a.exec),
-        // Prefer an explicit icon file; when none is stored — Windows shortcuts
-        // (icon pulled from the `.lnk`/`.exe` itself) and Linux binaries — fall
-        // back to `exec`, the target path. On Windows that yields the
-        // shell/embedded icon; elsewhere it resolves to an empty image, which is
-        // exactly the previous `None` behaviour.
+        // Windows shortcuts / `.exe` store no icon path: fall back to `exec` and
+        // let the shell pull the embedded / `.lnk` icon. Linux never does this —
+        // `exec` is a command string (or an ELF binary), *not* an image; passing
+        // it to Slint would spam "Error loading image" and waste disk I/O. On
+        // Linux, no resolved icon simply means no icon.
         icon: {
-            let icon_path = a
-                .icon_path
-                .as_deref()
-                .map(Path::new)
-                .unwrap_or_else(|| Path::new(&*a.exec));
-            cache.get(icon_path)
+            #[cfg(windows)]
+            {
+                let icon_path = a
+                    .icon_path
+                    .as_deref()
+                    .map(Path::new)
+                    .unwrap_or_else(|| Path::new(&*a.exec));
+                cache.get(icon_path)
+            }
+            #[cfg(not(windows))]
+            {
+                match a.icon_path.as_deref() {
+                    Some(p) => cache.get(Path::new(p)),
+                    None => Image::default(),
+                }
+            }
         },
         subtitle: subtitle.into(),
         idle_subtitle: idle_subtitle.into(),
