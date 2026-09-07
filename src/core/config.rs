@@ -211,8 +211,8 @@ tab = "up"         # select the previous entry
 a = "stools"       # summon the window (global hotkey on Windows)
 
 [keybindings.ctrl]
-u = "up"         # example: add ctrl+u to select the previous entry
-e = "down"       # example: add ctrl+e to select the next entry
+u = "up"         # ctrl+u: select the previous entry
+e = "down"       # ctrl+e: select the next entry
 
 # Theme. Colours use Fuzzel's RRGGBBAA hex notation (a leading '#' is allowed,
 # RGB / RGBA / RRGGBB are accepted too), so Fuzzel themes can be reused as-is.

@@ -247,14 +247,28 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
 /// Focus + raise the launcher window and select all text in the search box.
 fn show_and_focus(ui: &LauncherWindow) {
     let _ = ui.show();
+    // The software renderer keeps its dirty-rect state across hide/show, and the
+    // working-set trim on hide can drop the window's backing pixels underneath
+    // it. Left alone, the next frame repaints only what changed (the focused
+    // input) and the list stays blank until a keystroke dirties it. Schedule a
+    // redraw here; the re-issued query in `show_launcher` then re-marks every
+    // row as changed so the whole window is painted before it is readable.
+    ui.window().request_redraw();
     // Activate the window so it comes to the foreground and can receive input.
     let handle = ui.window().window_handle();
     match handle.window_handle() {
         Ok(wh) if matches!(wh.as_raw(), RawWindowHandle::Win32(_)) => {
             if let RawWindowHandle::Win32(w) = wh.as_raw() {
                 unsafe {
-                    windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(
-                        w.hwnd.get() as *mut core::ffi::c_void
+                    let hwnd = w.hwnd.get() as *mut core::ffi::c_void;
+                    windows_sys::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd);
+                    // The compositor may have discarded the surface's pixels
+                    // while the window was hidden; invalidate the whole client
+                    // area so Windows asks for every pixel back.
+                    windows_sys::Win32::Graphics::Gdi::InvalidateRect(
+                        hwnd,
+                        std::ptr::null(),
+                        1,
                     );
                 }
             }
@@ -340,6 +354,13 @@ impl Rescanner {
 /// Raise the launcher, then quietly bring the index up to date.
 fn show_launcher(ui: &LauncherWindow, rescanner: &Rescanner) {
     show_and_focus(ui);
+    // Re-run the current query. The (possibly identical) results come back
+    // through `sync_model_in_place`, whose per-row `set_row_data` marks every
+    // row dirty — that is what makes the software renderer paint the list again
+    // after a hide/show, when its dirty-rect state says only the input changed.
+    // Routed through the `search_changed` callback so no `!Send` `SearchBackend`
+    // handle has to be captured by the hotkey/tray closures.
+    ui.invoke_search_changed(ui.get_query());
     rescanner.request();
 }
 

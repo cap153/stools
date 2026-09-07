@@ -102,8 +102,8 @@ tab = "up"         # 选择上一项
 a = "stools"       # 唤出窗口（Windows 全局热键）
 
 [keybindings.ctrl]
-u = "up"         # 示例：绑定 Ctrl+U 选择上一项
-e = "down"       # 示例：绑定 Ctrl+E 选择下一项
+u = "up"         # Ctrl+U：选择上一项
+e = "down"       # Ctrl+E：选择下一项
 
 # 主题设置。颜色采用 Fuzzel 的 RRGGBBAA 十六进制记法（允许以 '#' 开头；RGB /
 # RGBA / RRGGBB 同样支持），因此可以直接复用 Fuzzel 的主题配置。
