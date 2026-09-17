@@ -637,6 +637,14 @@ pub fn run() {
     trim_memory();
     let t_trim = t0.elapsed();
 
+    // 固定 Wayland/X11 应用身份，必须在窗口创建前设置：Slint 的 winit 后端会把它
+    // 当作 xdg_toplevel.set_app_id（app_id）/ WM_CLASS。Winit 不读取 WAYLAND_APP_ID
+    // 这类 GLFW 变量，所以必须用 Slint 的 API。这样 rrwm 等可按 app_id == "stools"
+    // 写专属规则（如单独关闭边框）。
+    // 窗口身份是增强项：设置失败不应让整个启动器 panic，只记录警告即可。
+    if let Err(err) = slint::set_xdg_app_id("stools") {
+        eprintln!("[stools] failed to set XDG app ID: {err}");
+    }
     let ui = LauncherWindow::new().unwrap();
     let t_new = t0.elapsed();
     let weak = ui.as_weak();

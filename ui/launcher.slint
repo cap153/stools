@@ -14,6 +14,10 @@ export struct AppItem {
 }
 
 export component LauncherWindow inherits Window {
+    // 固定窗口身份：消除默认的 "Slint Window"，并让窗口管理器（Hyprland/Sway/
+    // River 及 rrwm）能通过标题兜底匹配。Wayland app_id 由 Rust 端
+    // `slint::set_xdg_app_id("stools")` 设置（见 src/platform/linux.rs）。
+    title: "stools";
     width: 500px;
     height: 580px;
     no-frame: true;
