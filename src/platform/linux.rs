@@ -702,11 +702,147 @@ mod tests {
         let _ = std::fs::remove_dir_all(&real_dir);
         let _ = std::fs::remove_dir_all(&link_dir);
     }
+
+    #[test]
+    fn centered_position_single_monitor() {
+        assert_eq!(centered_position(0, 0, 1920, 1080, 500, 580), (710, 250));
+    }
+
+    #[test]
+    fn centered_position_negative_multi_monitor() {
+        assert_eq!(
+            centered_position(-1920, 0, 1920, 1080, 500, 580),
+            (-1210, 250)
+        );
+    }
+
+    #[test]
+    fn centers_on_redraw_until_succeeded() {
+        use slint::winit_030::winit::event::WindowEvent;
+        use std::cell::Cell;
+
+        let centered = Cell::new(false);
+
+        // Unrelated event: no attempt, and no state change. `center_window` is
+        // never even called.
+        assert!(!should_center_now(&centered, &WindowEvent::Focused(true)));
+        assert!(!centered.get());
+
+        // The gate does NOT set the flag itself — only the caller flips it after
+        // `center_window` succeeds. So every RedrawRequested while un-centered is
+        // a fresh attempt request (this is what makes a failed first attempt retry).
+        assert!(should_center_now(&centered, &WindowEvent::RedrawRequested));
+        assert!(!centered.get());
+        assert!(should_center_now(&centered, &WindowEvent::RedrawRequested));
+        assert!(!centered.get());
+
+        // Once the caller reports success, no further attempt is requested.
+        centered.set(true);
+        assert!(!should_center_now(&centered, &WindowEvent::RedrawRequested));
+        assert!(!should_center_now(&centered, &WindowEvent::Focused(false)));
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Run: load → build UI → wire callbacks → show
 // ---------------------------------------------------------------------------
+
+/// Pure centering math: given a rectangle (`area_x`, `area_y`, `area_width`,
+/// `area_height`) and a window size, return the top-left that centers the
+/// window within that area. Shared by `center_window` and the unit tests so the
+/// arithmetic can be checked without a live display server.
+#[cfg(target_os = "linux")]
+fn centered_position(
+    area_x: i32,
+    area_y: i32,
+    area_width: u32,
+    area_height: u32,
+    window_width: u32,
+    window_height: u32,
+) -> (i32, i32) {
+    (
+        area_x + (area_width as i32 - window_width as i32) / 2,
+        area_y + (area_height as i32 - window_height as i32) / 2,
+    )
+}
+
+/// Center the launcher on the current monitor. Wayland forbids ordinary
+/// `xdg-toplevel` clients from choosing a global position, so there we leave
+/// placement entirely to the compositor. Which backend we are on is decided by
+/// the window's *actual* raw handle rather than environment variables: under
+/// XWayland both `WAYLAND_DISPLAY` and `DISPLAY` are set, and only the handle
+/// tells us whether repositioning is allowed.
+///
+/// Must be called from within the winit event loop (see the
+/// `on_winit_window_event` hook in `run`): `with_winit_window` only yields a
+/// window once the native one exists, which is not guaranteed right after
+/// `show()`.
+/// Returns `true` when centering is satisfied — either we actually placed the
+/// window, or there is nothing to do (Wayland / no live native window). Returns
+/// `false` only when an X11 centering attempt could not complete yet (no monitor
+/// or no raw handle); the caller turns that into a retry on the next redraw.
+#[cfg(target_os = "linux")]
+fn center_window(ui: &LauncherWindow) -> bool {
+    use slint::winit_030::winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    use slint::winit_030::{WinitWindowAccessor, winit};
+
+    ui.window()
+        .with_winit_window(|winit_window: &winit::window::Window| -> bool {
+            let Ok(handle) = winit_window.window_handle() else {
+                return false;
+            };
+            // Only X11 permits clients to place a normal toplevel. Wayland and
+            // anything else: nothing to set, and no retry is meaningful.
+            if !matches!(
+                handle.as_raw(),
+                RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_)
+            ) {
+                return true;
+            }
+
+            let Some(monitor) = winit_window.current_monitor() else {
+                return false;
+            };
+            let monitor_pos = monitor.position();
+            let monitor_size = monitor.size();
+            let window_size = winit_window.outer_size();
+
+            let (x, y) = centered_position(
+                monitor_pos.x,
+                monitor_pos.y,
+                monitor_size.width,
+                monitor_size.height,
+                window_size.width,
+                window_size.height,
+            );
+
+            ui.window().set_position(slint::PhysicalPosition::new(x, y));
+            true
+        })
+        .unwrap_or(false)
+}
+
+/// Centering gate for the winit event hook. Returns `true` on every
+/// `RedrawRequested` that arrives while the window is *not yet* marked centered —
+/// i.e. it only decides *whether to attempt*, and deliberately does **not** flip
+/// the flag itself. The caller flips `centered` only after `center_window`
+/// actually succeeds, so a failed first attempt is retried on the next redraw.
+/// Kept pure (no side effects) so the timing logic is unit-testable without a
+/// live window, and `center_window` is never attempted before the native window
+/// exists.
+#[cfg(target_os = "linux")]
+fn should_center_now(
+    centered: &std::cell::Cell<bool>,
+    event: &slint::winit_030::winit::event::WindowEvent,
+) -> bool {
+    if centered.get() {
+        return false;
+    }
+    matches!(
+        event,
+        slint::winit_030::winit::event::WindowEvent::RedrawRequested
+    )
+}
 
 pub fn run() {
     let t0 = std::time::Instant::now();
@@ -806,6 +942,33 @@ pub fn run() {
     ui.on_escape_pressed(|| {
         let _ = slint::quit_event_loop();
     });
+
+    // Register the one-shot centering hook *before* showing. `center_window`
+    // needs `with_winit_window`, which only works once the native window exists
+    // and the event loop is active — not guaranteed right after `show()`. The
+    // first `RedrawRequested` proves the winit window is live, so we center
+    // there. On Wayland `center_window` itself becomes a no-op (raw-handle
+    // check), so this hook is harmless there.
+    {
+        use slint::winit_030::{EventResult, WinitWindowAccessor};
+
+        let centered = Rc::new(std::cell::Cell::new(false));
+        let centered_flag = centered.clone();
+        let ui_weak = ui.as_weak();
+
+        ui.window().on_winit_window_event(move |_window, event| {
+            if should_center_now(&centered_flag, event) {
+                if let Some(ui) = ui_weak.upgrade() {
+                    // Only mark centered once the attempt actually succeeds; a
+                    // failed first redraw will retry on the next one.
+                    if center_window(&ui) {
+                        centered_flag.set(true);
+                    }
+                }
+            }
+            EventResult::Propagate
+        });
+    }
 
     ui.show().unwrap();
     let t_show = t0.elapsed();

@@ -15,6 +15,11 @@ slint = { version = "1.11", default-features = false, features = [
     "renderer-software",
     "compat-1-2",
     "raw-window-handle-06",
+    # Exposes `slint::winit_030::{WinitWindowAccessor, winit}` so the Linux X11
+    # path can read the active monitor and position the window. The resolved
+    # Slint version is 1.17.x (caret `1.11` keeps picking the newest 1.x), where
+    # this API has been stable since 1.12; we do NOT bump the version requirement.
+    "unstable-winit-030",
 ] }
 nucleo-matcher = "0.3"
 pinyin = { version = "0.10", features = ["plain", "heteronym"] }

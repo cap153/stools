@@ -244,8 +244,96 @@ pub fn scan_apps(extra_dirs: &[PathBuf]) -> Vec<AppEntry> {
     entries
 }
 
+thread_local! {
+    /// Armed by `show_and_focus` before `show()`; consumed by the winit event
+    /// hook on the next `RedrawRequested`. Centering directly after `show()`
+    /// would race native window creation, when no `HWND` exists yet.
+    static CENTER_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Center the launcher on the monitor where the cursor currently sits, using
+/// the work area (which excludes the taskbar) so it never lands underneath it.
+fn center_window(ui: &LauncherWindow) {
+    let handle = ui.window().window_handle();
+
+    let Ok(wh) = handle.window_handle() else {
+        return;
+    };
+
+    let raw = wh.as_raw();
+    let RawWindowHandle::Win32(w) = raw else {
+        return;
+    };
+
+    unsafe {
+        use windows_sys::Win32::Foundation::{POINT, RECT};
+        use windows_sys::Win32::Graphics::Gdi::{
+            GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+        };
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetCursorPos, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+        };
+
+        let hwnd = w.hwnd.get() as *mut core::ffi::c_void;
+
+        // Use the mouse position to select the active monitor. This makes a
+        // global-hotkey launcher appear on the monitor where the user is working.
+        let mut cursor = POINT { x: 0, y: 0 };
+        if GetCursorPos(&mut cursor) == 0 {
+            return;
+        }
+
+        let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return;
+        }
+
+        let mut info = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            rcMonitor: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            rcWork: RECT {
+                left: 0,
+                top: 0,
+                right: 0,
+                bottom: 0,
+            },
+            dwFlags: 0,
+        };
+
+        if GetMonitorInfoW(monitor, &mut info) == 0 {
+            return;
+        }
+
+        let width = ui.window().size().width as i32;
+        let height = ui.window().size().height as i32;
+
+        let work = info.rcWork;
+        let x = work.left + ((work.right - work.left) - width) / 2;
+        let y = work.top + ((work.bottom - work.top) - height) / 2;
+
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+        );
+    }
+}
+
 /// Focus + raise the launcher window and select all text in the search box.
 fn show_and_focus(ui: &LauncherWindow) {
+    // Arm centering; the winit event hook runs it once the window truly exists
+    // (see `run`). Calling `center_window` straight after `show()` would race
+    // native window creation, when there is no `HWND` yet.
+    CENTER_PENDING.with(|pending| pending.set(true));
     let _ = ui.show();
     // The software renderer keeps its dirty-rect state across hide/show, and the
     // working-set trim on hide can drop the window's backing pixels underneath
@@ -528,6 +616,30 @@ pub fn run() {
     let weak = ui.as_weak();
 
     theme::apply_theme(&ui, &config.theme);
+
+    // Center the launcher once the native window exists. `with_winit_window`
+    // (used by `center_window`) is only valid while the event loop is active, so
+    // — instead of centering right after `show()` — `show_and_focus` arms
+    // `CENTER_PENDING` and we center on the first `RedrawRequested` that
+    // follows, which proves the window (and its `HWND`) is live. It re-arms on
+    // every show, so a re-summon re-centers too.
+    {
+        use slint::winit_030::{EventResult, WinitWindowAccessor};
+
+        let ui_weak = ui.as_weak();
+        ui.window().on_winit_window_event(move |_window, event| {
+            if matches!(
+                event,
+                slint::winit_030::winit::event::WindowEvent::RedrawRequested
+            ) && CENTER_PENDING.with(|pending| pending.replace(false))
+            {
+                if let Some(ui) = ui_weak.upgrade() {
+                    center_window(&ui);
+                }
+            }
+            EventResult::Propagate
+        });
+    }
 
     // Shared (not `Rc`) because the tray menu handler that replaces it on a
     // config reload has to be `Send + Sync`.
