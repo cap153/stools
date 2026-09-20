@@ -1,9 +1,9 @@
 #![cfg(windows)]
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::str::FromStr;
-use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
@@ -265,11 +265,7 @@ fn show_and_focus(ui: &LauncherWindow) {
                     // The compositor may have discarded the surface's pixels
                     // while the window was hidden; invalidate the whole client
                     // area so Windows asks for every pixel back.
-                    windows_sys::Win32::Graphics::Gdi::InvalidateRect(
-                        hwnd,
-                        std::ptr::null(),
-                        1,
-                    );
+                    windows_sys::Win32::Graphics::Gdi::InvalidateRect(hwnd, std::ptr::null(), 1);
                 }
             }
         }
@@ -290,9 +286,7 @@ fn hide_window(ui: &LauncherWindow) {
     // within microseconds the next time the window is summoned. This runs on
     // every hide (Esc, launch, summon toggle).
     unsafe {
-        use windows_sys::Win32::System::Threading::{
-            GetCurrentProcess, SetProcessWorkingSetSize,
-        };
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetProcessWorkingSetSize};
         let _ = SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
     }
 }
@@ -647,8 +641,7 @@ pub fn run() {
     let menu = muda::Menu::new();
     let show_item = muda::MenuItem::with_id("show", show_text, true, None);
     let reload_item = muda::MenuItem::with_id("reload_config", reload_text, true, None);
-    let folder_item =
-        muda::MenuItem::with_id("show_config_folder", folder_text, true, None);
+    let folder_item = muda::MenuItem::with_id("show_config_folder", folder_text, true, None);
     let quit_item = muda::MenuItem::with_id("quit", quit_text, true, None);
 
     let _ = menu.append(&show_item);

@@ -149,10 +149,8 @@ mod tests {
 
     #[test]
     fn both_templates_parse_cleanly() {
-        let en: Config =
-            toml::from_str(DEFAULT_CONFIG_TEMPLATE_EN).expect("EN template parses");
-        let zh: Config =
-            toml::from_str(DEFAULT_CONFIG_TEMPLATE_ZH).expect("ZH template parses");
+        let en: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE_EN).expect("EN template parses");
+        let zh: Config = toml::from_str(DEFAULT_CONFIG_TEMPLATE_ZH).expect("ZH template parses");
         assert_eq!(en.theme.background, zh.theme.background);
         assert_eq!(en.theme.prompt, zh.theme.prompt);
         assert_eq!(en.theme.marquee_duration, zh.theme.marquee_duration);

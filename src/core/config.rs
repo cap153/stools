@@ -567,7 +567,10 @@ mod tests {
     #[test]
     fn expands_tilde_with_backslash() {
         let home = dirs::home_dir().expect("home dir");
-        assert_eq!(expand_path("~\\.cargo\\bin"), Some(home.join(".cargo\\bin")));
+        assert_eq!(
+            expand_path("~\\.cargo\\bin"),
+            Some(home.join(".cargo\\bin"))
+        );
     }
 
     #[cfg(windows)]

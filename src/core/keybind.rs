@@ -474,7 +474,10 @@ mod tests {
         let map = KeybindingMap::from_config(&config("alt", "space", "stools"));
         assert_eq!(
             map.summon_binding(),
-            Some((ModifiersMask::new(false, true, false, false), "space".into()))
+            Some((
+                ModifiersMask::new(false, true, false, false),
+                "space".into()
+            ))
         );
         assert_eq!(map.resolve_event("a", false, true, false, false), None);
 
@@ -482,7 +485,10 @@ mod tests {
         let map = KeybindingMap::from_config(&config("ctrl", "space", "stools"));
         assert_eq!(
             map.summon_binding(),
-            Some((ModifiersMask::new(true, false, false, false), "space".into()))
+            Some((
+                ModifiersMask::new(true, false, false, false),
+                "space".into()
+            ))
         );
     }
 

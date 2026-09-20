@@ -184,7 +184,9 @@ fn parse_bool(v: Option<&str>, def: bool) -> bool {
 }
 
 fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEntry> {
-    let Ok(content) = fs::read_to_string(path) else { return Vec::new(); };
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
     let mut default_name = None::<String>;
     let mut zh_name = None::<String>;
     let mut exec = None::<String>;
@@ -213,9 +215,7 @@ fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEnt
             "Name" => default_name = Some(value.to_string()),
             // Any Chinese locale name: Simplified (zh_CN / zh) and Traditional
             // (zh_TW / zh_HK / …) — vendors sometimes ship only a subset.
-            k if k.starts_with("Name[zh") && k.ends_with(']') => {
-                zh_name = Some(value.to_string())
-            }
+            k if k.starts_with("Name[zh") && k.ends_with(']') => zh_name = Some(value.to_string()),
             "Exec" => exec = Some(value.to_string()),
             "Icon" => icon = Some(value.to_string()),
             "Hidden" => hidden = parse_bool(Some(value), false),
@@ -227,8 +227,12 @@ fn parse_desktop(path: &Path, icon_map: &HashMap<String, PathBuf>) -> Vec<AppEnt
     if !is_application {
         return Vec::new();
     }
-    let Some(exec_value) = exec else { return Vec::new(); };
-    let Some(def_name) = default_name else { return Vec::new(); };
+    let Some(exec_value) = exec else {
+        return Vec::new();
+    };
+    let Some(def_name) = default_name else {
+        return Vec::new();
+    };
 
     // Pick the primary name from the current locale, and keep the other language
     // (when it differs) as a searchable alias. That way an English query hits the
@@ -313,7 +317,23 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
         let Ok(rd) = fs::read_dir(dir) else { continue };
         for entry in rd.flatten() {
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else { continue };
+            // Cheap lstat-style check: does this directory entry itself point at a
+            // symlink? Symlinks keep their own name/path (see dedup below).
+            // `symlink_metadata` (lstat) rather than `entry.file_type()` because
+            // the latter leans on `d_type`, which is `DT_UNKNOWN` on some
+            // filesystems (overlayfs/tmpfs) and would misreport the symlink as a
+            // regular file — causing it to be canonical-deduped away.
+            let is_symlink = fs::symlink_metadata(entry.path())
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+
+            // Use `fs::metadata` (which follows the symlink) so an executable
+            // symlink is judged by its *target*'s type/permissions, not the
+            // symlink entry itself. (`DirEntry::metadata` does not follow links
+            // here, so it would wrongly see a symlink as "not a file".)
+            let Ok(meta) = fs::metadata(entry.path()) else {
+                continue;
+            };
             if !meta.is_file() {
                 continue;
             }
@@ -331,12 +351,16 @@ fn scan_binaries(dirs: &[PathBuf]) -> Vec<AppEntry> {
 
             let (pinyin_full, pinyin_abbr, pinyin_indices) = matcher::pinyin_fields(name);
             let id = format!("bin:{}", path.to_string_lossy());
-            // Canonicalize so symlinked directories (e.g. /bin -> /usr/bin) don't
-            // yield the same physical file twice.
-            let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-            let canon_str = canon.to_string_lossy().into_owned();
-            if !seen_paths.insert(canon_str) {
-                continue;
+            // Canonicalize so symlinked *directories* (e.g. /bin -> /usr/bin)
+            // don't yield the same physical file twice. Symlinked *files* keep
+            // their own path/name so `~/.local/bin/foo -> /usr/bin/bar` is
+            // indexed as `foo` executing `~/.local/bin/foo`, not as `bar`.
+            if !is_symlink {
+                let canon = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                let canon_str = canon.to_string_lossy().into_owned();
+                if !seen_paths.insert(canon_str) {
+                    continue;
+                }
             }
             // subtitle is left empty here; the caller marks it only when an entry's
             // name collides with another entry from a different path.
@@ -477,15 +501,22 @@ pub fn load_apps(
     }
 
     if let Some(cached) = indexer::load_cache(fingerprint) {
-        // Real background refresh — doesn't block the main thread.
+        // Cache with true background refresh: the binary-directory fingerprint
+        // already guarantees a newly added/removed executable shows up on the
+        // next launch, but `scan_apps` also pulls in system `.desktop` dirs and
+        // icon directories (via `desktop_dirs`/`build_icon_map`) that the
+        // fingerprint does not fully cover — those still benefit from a
+        // non-blocking refresh so the cache stays current without slowing start.
         let custom = custom_dirs.to_vec();
         let dirs = binary_dirs.to_vec();
+
         std::thread::spawn(move || {
             let fresh = scan_apps(&custom, &dirs);
             if !fresh.is_empty() {
                 indexer::save_cache(&fresh, fingerprint);
             }
         });
+
         return cached;
     }
     // Cold start (or the scanned directories changed): scan synchronously.
@@ -530,9 +561,8 @@ mod tests {
 
     fn write_desktop(dir: &std::path::Path, name: &str, zh: Option<&str>) -> std::path::PathBuf {
         let p = dir.join("sample.desktop");
-        let mut c = format!(
-            "[Desktop Entry]\nType=Application\nName={name}\nExec=echo hi\nIcon=firefox\n"
-        );
+        let mut c =
+            format!("[Desktop Entry]\nType=Application\nName={name}\nExec=echo hi\nIcon=firefox\n");
         if let Some(zh) = zh {
             c.push_str(&format!("Name[zh_CN]={zh}\n"));
         }
@@ -607,6 +637,70 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert!(!entries[0].is_alias);
         assert_eq!(&*entries[0].name, "Firefox");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_symlink_is_indexed_as_own_command() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join("stools_test_binary_symlink");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let target = dir.join("real-tool");
+        let link = dir.join("alias-tool");
+
+        std::fs::write(&target, b"#!/bin/sh\n").unwrap();
+
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        symlink(&target, &link).unwrap();
+
+        let entries = scan_binaries(&[dir.clone()]);
+
+        assert!(entries.iter().any(|e| e.name.as_ref() == "real-tool"));
+        assert!(entries.iter().any(|e| e.name.as_ref() == "alias-tool"));
+        assert!(entries.iter().any(|e| e.name.as_ref() == "alias-tool"
+            && e.exec.as_ref() == link.to_string_lossy().as_ref()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn executable_symlink_to_other_dir_is_itself() {
+        use std::os::unix::fs::symlink;
+
+        let real_dir = std::env::temp_dir().join("stools_test_sym_src");
+        let link_dir = std::env::temp_dir().join("stools_test_sym_dst");
+        let _ = std::fs::remove_dir_all(&real_dir);
+        let _ = std::fs::remove_dir_all(&link_dir);
+        std::fs::create_dir_all(&real_dir).unwrap();
+        std::fs::create_dir_all(&link_dir).unwrap();
+
+        let target = real_dir.join("real-tool");
+        let link = link_dir.join("alias-tool");
+
+        std::fs::write(&target, b"#!/bin/sh\n").unwrap();
+        let mut perms = std::fs::metadata(&target).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&target, perms).unwrap();
+
+        // Symlink lives in `link_dir` but points at an executable in `real_dir`.
+        symlink(&target, &link).unwrap();
+
+        // Only `link_dir` is scanned, so only the symlink should surface.
+        let entries = scan_binaries(&[link_dir.clone()]);
+
+        assert!(entries.iter().any(|e| e.name.as_ref() == "alias-tool"));
+        assert!(entries.iter().any(|e| e.name.as_ref() == "alias-tool"
+            && e.exec.as_ref() == link.to_string_lossy().as_ref()));
+
+        let _ = std::fs::remove_dir_all(&real_dir);
+        let _ = std::fs::remove_dir_all(&link_dir);
     }
 }
 

@@ -23,7 +23,9 @@ use nucleo_matcher::{Config as MatcherConfig, Matcher};
 use crate::core::history::HistoryRecord;
 use crate::core::matcher::{self, MatcherScratch};
 use crate::core::model::AppEntry;
-use crate::launcher::{AppImageCache, AppItem, LauncherWindow, build_items_vec, sync_model_in_place};
+use crate::launcher::{
+    AppImageCache, AppItem, LauncherWindow, build_items_vec, sync_model_in_place,
+};
 use slint::{Model, VecModel};
 
 /// Rows the UI actually draws; the window shows ~14, so 16 fills the screen with
@@ -80,7 +82,12 @@ impl AppIndex {
         if fingerprint(&self.snapshot()) == fingerprint(&new) {
             return false;
         }
-        if self.entries.write().map(|mut g| *g = Arc::new(new)).is_err() {
+        if self
+            .entries
+            .write()
+            .map(|mut g| *g = Arc::new(new))
+            .is_err()
+        {
             return false;
         }
         self.refresh();
@@ -91,7 +98,11 @@ impl AppIndex {
     /// indexed app appears without them retyping the query.
     #[cfg(windows)]
     pub fn refresh(&self) {
-        let query = self.last_query.lock().map(|q| q.clone()).unwrap_or_default();
+        let query = self
+            .last_query
+            .lock()
+            .map(|q| q.clone())
+            .unwrap_or_default();
         self.submit(&query, true);
     }
 
@@ -261,8 +272,7 @@ impl SearchBackend {
                             };
 
                             let cache = AppImageCache::clone_on_ui_thread();
-                            let new_items =
-                                build_items_vec(&apps_ui, &idxs, &highlights, &cache);
+                            let new_items = build_items_vec(&apps_ui, &idxs, &highlights, &cache);
                             // Reuse the one model set at startup (which lives only on
                             // the UI thread) instead of swapping in a fresh one, so the
                             // on-screen rows are updated in place rather than rebuilt.

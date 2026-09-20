@@ -352,9 +352,7 @@ pub fn rank(
         // Alias entries (secondary-language `.desktop` names) are excluded so the
         // first screen shows only the primary name, not "关机" and "Power Off" side
         // by side. They still participate once a query is typed (below).
-        let mut idxs: Vec<usize> = (0..items.len())
-            .filter(|&i| !items[i].is_alias)
-            .collect();
+        let mut idxs: Vec<usize> = (0..items.len()).filter(|&i| !items[i].is_alias).collect();
         idxs.sort_by(|&a, &b| {
             let ea = &items[a];
             let eb = &items[b];

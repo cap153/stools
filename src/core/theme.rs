@@ -184,18 +184,33 @@ mod tests {
     #[test]
     fn parses_durations() {
         let secs = |d: std::time::Duration| d;
-        assert_eq!(parse_duration("8s"), secs(std::time::Duration::from_secs(8)));
-        assert_eq!(parse_duration("12"), secs(std::time::Duration::from_secs(12)));
+        assert_eq!(
+            parse_duration("8s"),
+            secs(std::time::Duration::from_secs(8))
+        );
+        assert_eq!(
+            parse_duration("12"),
+            secs(std::time::Duration::from_secs(12))
+        );
         assert_eq!(
             parse_duration("6500ms"),
             secs(std::time::Duration::from_millis(6500))
         );
         // Clamped, not rejected.
-        assert_eq!(parse_duration("0.1s"), secs(std::time::Duration::from_secs(1)));
-        assert_eq!(parse_duration("120s"), secs(std::time::Duration::from_secs(60)));
+        assert_eq!(
+            parse_duration("0.1s"),
+            secs(std::time::Duration::from_secs(1))
+        );
+        assert_eq!(
+            parse_duration("120s"),
+            secs(std::time::Duration::from_secs(60))
+        );
         // Garbage falls back to the default.
         assert_eq!(parse_duration(""), secs(std::time::Duration::from_secs(8)));
-        assert_eq!(parse_duration("soon"), secs(std::time::Duration::from_secs(8)));
+        assert_eq!(
+            parse_duration("soon"),
+            secs(std::time::Duration::from_secs(8))
+        );
     }
 
     #[test]
