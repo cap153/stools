@@ -38,12 +38,14 @@ pub fn prettify_path(path: &Path) -> String {
     s.into_owned()
 }
 
-/// Shrink a long path to a `head...tail` form so it reads well while idle
-/// (e.g. `%APPDATA%\...\Programs`, `C:\...\Start Menu\Programs`, `~/.../bin`).
+/// Shrink a long path to a `head…tail` form so it reads well while idle
+/// (e.g. `%APPDATA%\…\Programs`, `C:\…\Start Menu\Programs`, `~/…/my_super_long_d…/bin`).
 ///
 /// The head keeps only the most meaningful prefix (an env var, `~`, the drive
-/// letter, or the first Linux directory) and the tail keeps the last component or
-/// two, joined by an ellipsis. Paths already shorter than `max_len` are unchanged.
+/// letter, or just the root `/`) and the tail keeps the last one or two
+/// meaningful components — truncating a key parent directory with an ellipsis
+/// instead of dropping it entirely, so a `bin` still shows which project it
+/// belongs to. Paths already shorter than `max_len` are unchanged.
 pub fn abbreviate_path(s: &str, max_len: usize) -> String {
     if s.chars().count() <= max_len {
         return s.to_string();
@@ -51,56 +53,90 @@ pub fn abbreviate_path(s: &str, max_len: usize) -> String {
 
     let is_backslash = s.contains('\\');
     let sep = if is_backslash { '\\' } else { '/' };
-    let ell = if is_backslash { r"\...\" } else { "/.../" };
+    // Compact single-character ellipsis.
+    let ell = if is_backslash { "\\…\\" } else { "/…/" };
 
-    // 1. Extract the head.
+    // 1. Extract a compact head anchor. The root is kept as just `/` so a long
+    //    first directory never overflows off the left edge.
     let head = if s.starts_with('%') {
         if let Some(end_idx) = s[1..].find('%') {
             &s[..=end_idx + 1] // "%APPDATA%"
         } else {
-            &s[..s.find(sep).unwrap_or(s.len())]
+            "%"
         }
     } else if s.starts_with('~') {
         "~"
-    } else if s.len() >= 3
-        && s.chars().nth(1) == Some(':')
-        && (s.chars().nth(2) == Some('\\') || s.chars().nth(2) == Some('/'))
-    {
+    } else if s.len() >= 2 && s.chars().nth(1) == Some(':') {
         &s[..2] // "C:"
     } else if s.starts_with('/') {
-        let rest = &s[1..];
-        if let Some(next_slash) = rest.find('/') {
-            &s[..=next_slash + 1] // "/usr"
-        } else {
-            s
-        }
+        "/" // root only, never the whole long first directory
     } else {
-        &s[..s.find(sep).unwrap_or(s.len())]
+        ""
     };
 
-    let head_clean = head.trim_end_matches(['/', '\\']);
+    // Keep the root slash; otherwise strip a trailing separator.
+    let head_clean = if head == "/" { "/" } else { head.trim_end_matches(['/', '\\']) };
     let head_len = head_clean.chars().count();
     let ell_len = ell.chars().count();
     let tail_budget = max_len.saturating_sub(head_len + ell_len);
 
-    // 2. Pull the most meaningful trailing components from the right.
-    let parts: Vec<&str> = s.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
-    let mut tail_parts: Vec<&str> = Vec::new();
-    let mut current_tail_len = 0;
+    if tail_budget == 0 {
+        return format!("{}{}", head_clean, ell);
+    }
 
-    for part in parts.iter().rev() {
-        let part_len = part.chars().count() + 1;
-        if current_tail_len + part_len <= tail_budget || tail_parts.is_empty() {
-            tail_parts.push(part);
-            current_tail_len += part_len;
+    // 2. Split into components.
+    let parts: Vec<&str> = s
+        .split(['/', '\\'])
+        .filter(|p| !p.is_empty() && *p != "~" && !p.starts_with('%') && !p.ends_with(':'))
+        .collect();
+
+    let mut tail_parts: Vec<String> = Vec::new();
+    let mut budget_left = tail_budget;
+
+    // 3. Collect trailing components right-to-left; truncate a key parent with
+    //    an ellipsis when it doesn't fit, instead of leaving a bare "bin".
+    for &part in parts.iter().rev() {
+        let part_len = part.chars().count();
+        let needed = if tail_parts.is_empty() { part_len } else { part_len + 1 };
+
+        if needed <= budget_left {
+            tail_parts.push(part.to_string());
+            budget_left = budget_left.saturating_sub(needed);
         } else {
+            let min_needed = if tail_parts.is_empty() { 0 } else { 1 };
+            if budget_left > min_needed + 4 {
+                let room = budget_left - min_needed - 1;
+                let prefix: String = part.chars().take(room).collect();
+                tail_parts.push(format!("{prefix}…"));
+            }
             break;
         }
     }
+
     tail_parts.reverse();
     let tail = tail_parts.join(if is_backslash { "\\" } else { "/" });
 
-    format!("{}{}{}", head_clean, ell, tail)
+    // Only insert the middle ellipsis when directories were actually skipped
+    // between the head and the tail. If every component made it into the tail
+    // (only the first one truncated with a trailing `…`), showing `/…/` would
+    // be a lie — e.g. `/my_super_long_dir/bin` → `/my_super_long_d…/bin`.
+    let has_omitted_dirs = parts.len() > tail_parts.len();
+
+    if has_omitted_dirs {
+        if head_clean == "/" {
+            format!("{}{}", ell, tail)
+        } else if head_clean.is_empty() {
+            format!("…{}{}", sep, tail)
+        } else {
+            format!("{}{}{}", head_clean, ell, tail)
+        }
+    } else if head_clean == "/" {
+        format!("/{}", tail)
+    } else if head_clean.is_empty() {
+        tail
+    } else {
+        format!("{}{}{}", head_clean, sep, tail)
+    }
 }
 
 /// Prettified path of the **directory containing** `path`.
@@ -254,26 +290,42 @@ mod tests {
     #[test]
     fn abbreviates_long_paths() {
         assert_eq!(
-            abbreviate_path(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 26),
-            r"%APPDATA%\...\Programs"
+            abbreviate_path(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs", 29),
+            r"%APPDATA%\…\Start M…\Programs"
         );
         assert_eq!(
-            abbreviate_path(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs", 28),
-            r"C:\...\Start Menu\Programs"
+            abbreviate_path(r"C:\ProgramData\Microsoft\Windows\Start Menu\Programs", 29),
+            r"C:\…\Start Menu\Programs"
         );
+        // Keep the key parent project dir, not just a bare bin.
         assert_eq!(
-            abbreviate_path("~/Documents/my_super_long_deep_project_directory/bin", 26),
-            "~/.../bin"
+            abbreviate_path("~/Documents/my_super_long_deep_project_directory/bin", 29),
+            "~/…/my_super_long_deep_p…/bin"
+        );
+        // Nothing is skipped between the root and the tail: no fake `/…/`.
+        assert_eq!(
+            abbreviate_path("/my_super_long_deep_project_directory/bin", 29),
+            "/my_super_long_deep_p…/bin"
+        );
+        // Root's first-level long dir: no spurious `/…` in front.
+        assert_eq!(
+            abbreviate_path("/my_super_long_deep_project_directory/bin", 26),
+            "/my_super_long_dee…/bin"
+        );
+        // Same for the home directory.
+        assert_eq!(
+            abbreviate_path("~/my_super_long_deep_project_directory/bin", 26),
+            "~/my_super_long_dee…/bin"
         );
         // Short paths are left untouched.
         assert_eq!(
             abbreviate_path("/usr/share/applications", 26),
             "/usr/share/applications"
         );
-        // An over-long Linux path collapses onto its first segment.
+        // An over-long Linux path keeps its deepest meaningful directory.
         assert_eq!(
             abbreviate_path("/usr/share/very_long_deep_dir/leaf", 26),
-            "/usr/.../leaf"
+            "/…/very_long_deep_d…/leaf"
         );
     }
 }
